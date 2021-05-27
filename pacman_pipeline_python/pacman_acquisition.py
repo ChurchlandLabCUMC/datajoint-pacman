@@ -7,7 +7,7 @@ from decimal import Decimal
 from functools import reduce
 from typing import Tuple, List
 
-DataJointTable = dj.user_tables.OrderedClass
+DataJointTable = dj.user_tables.UserTable
 
 schema = dj.schema(dj.config.get('database.prefix') + 'churchland_analyses_pacman_acquisition')
 
