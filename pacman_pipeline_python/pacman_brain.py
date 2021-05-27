@@ -198,7 +198,6 @@ class NeuronRate(dj.Computed):
         # insert neuron rates
         self.insert(neuron_rate_keys, skip_duplicates=True)
 
-
 @schema
 class NeuronEvenRate(dj.Computed):
     definition = """
