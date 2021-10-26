@@ -337,8 +337,10 @@ class NeuroDataArray(NeuroDataArrayConstructor):
         If condition_ids is provided, uses those IDs to get the principal components.
         Limits PCA to the top max_components, if provided.
         Note: resets the data set, then mean centers and (soft) normalizes the source data array with soft_factor."""
+        condition_time_dim_name = next(index for index in list(self.data_set.indexes) if re.match(r'.*time',index))
+        condition_dim_name = re.match(r'(.*)_time', condition_time_dim_name).group(1)
         if condition_ids is None:
-            condition_ids = np.unique(self.data_set['condition_id'].values)
+            condition_ids = np.unique(self.data_set[condition_dim_name].values)
 
         self.reset_data_set()
         self.mean_center(only_vars=[var_name])
@@ -352,18 +354,21 @@ class NeuroDataArray(NeuroDataArrayConstructor):
             data_projection,
             coords = [
                 ('principal_component', 1+np.arange(pca.components_.shape[0])),
-                ('condition_time', self.data_set.indexes['condition_time'])
+                (condition_time_dim_name, self.data_set.indexes[condition_time_dim_name])
             ],
             attrs = {'subspace_condition_ids': condition_ids}
         )
         
     def reorder_conditions(self, sorted_condition_ids: list):
         """Down selects and reorders data set by provided condition IDs."""
-        ct_indexes = np.vstack([np.array(ct) for ct in self.data_set.indexes['condition_time']])
+        condition_time_dim_name = next(index for index in list(self.data_set.indexes) if re.match(r'.*time',index))
+        condition_dim_name = re.match(r'(.*)_time', condition_time_dim_name).group(1)
+
+        ct_indexes = np.vstack([np.array(ct) for ct in self.data_set.indexes[condition_time_dim_name]])
         sorted_ct_indexes = np.vstack([ct_indexes[ct_indexes[:,0]==cid,:] for cid in sorted_condition_ids])
         sorted_ct_indexes = [ct for ct in sorted_ct_indexes.T]
         sorted_ct_indexes[0] = sorted_ct_indexes[0].astype(int)
-        new_ct_indexes = pd.MultiIndex.from_arrays(sorted_ct_indexes, names=['condition_id', 'time'])
+        new_ct_indexes = pd.MultiIndex.from_arrays(sorted_ct_indexes, names=[condition_dim_name, 'time'])
         self.data_set = self.data_set.reindex(condition_time=new_ct_indexes)
 
     def trial_average(self, n_folds: int=1):
