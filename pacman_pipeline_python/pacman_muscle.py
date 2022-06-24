@@ -5,8 +5,8 @@ import numpy as np
 import scipy
 import neo
 import matplotlib.pyplot as plt
-from churchland_pipeline_python import lab, acquisition, processing, reference
-from churchland_pipeline_python.utilities import datajointutils
+from src.churchland_pipeline_python import lab, acquisition, processing, reference
+from src.churchland_pipeline_python.utilities import datajointutils
 from . import pacman_acquisition, pacman_processing
 from sklearn import decomposition
 from typing import Any, List, Tuple
@@ -149,7 +149,7 @@ class MotorUnitSpikeRaster(dj.Computed):
                 t_new, _ = pacman_acquisition.ConditionParams.target_force_profile(cond_key['condition_id'], fs_new)
 
             # create time bins in new time base
-            t_bins = np.concatenate((t_new[:-1,np.newaxis], t_new[1:,np.newaxis]), axis=1).mean(axis=1)
+            t_bins = np.concatenate((t_new[:-1,np.newaxis], t_new[1:,np.newaxis]), axis=1).Mean(axis=1)
             t_bins = np.insert(t_bins, 0, t_new[0]-1/(2*fs_new))
             t_bins = np.append(t_bins, t_new[-1]+1/(2*fs_new))
 
@@ -336,7 +336,7 @@ class EmgEnvelopeMean(dj.Computed):
         emg_envelope = (EmgEnvelope & key & (pacman_processing.GoodTrial & 'good_trial')).fetch('emg_envelope')
         emg_envelope = np.stack(emg_envelope)
 
-        # update key with mean and standard error
+        # update key with Mean and standard error
         key.update(
             emg_envelope_mean=emg_envelope.mean(axis=0),
             emg_envelope_sem=emg_envelope.std(axis=0, ddof=(1 if emg_envelope.shape[0] > 1 else 0))/np.sqrt(emg_envelope.shape[0])
@@ -358,7 +358,7 @@ class EmgEnvelopeMean(dj.Computed):
         Args:
             fs (int, optional): Sample rate. If not None, or if different sample rates across recordings, resamples EMGs to new rate. Defaults to None.
             soft_normalize (int, optional): If not None, normalizes data with this value added to the signal range. Defaults to None.
-            mean_center (bool, optional): Whether to subtract the cross-condition mean from the responses. Defaults to False.
+            mean_center (bool, optional): Whether to subtract the cross-condition Mean from the responses. Defaults to False.
             output_format (str, optional): Output data format. Options: 
                 * 'array' (N x CT) [Default]
                 * 'dict' (list of dictionaries per emg channel/condition)
@@ -439,7 +439,7 @@ class EmgEnvelopeMean(dj.Computed):
             signal_range = np.hstack(emgs).ptp(axis=1, keepdims=True)
             emgs = [X/(signal_range + soft_normalize) for X in emgs]
 
-        # mean-center
+        # Mean-center
         if mean_center:
             signal_mean = np.hstack(emgs).mean(axis=1, keepdims=True)
             emgs = [X - signal_mean for X in emgs]
@@ -477,6 +477,7 @@ class MotorUnitPsth(dj.Computed):
     ---
     motor_unit_psth:     longblob # motor unit trial-averaged firing rate (spikes/s)
     motor_unit_psth_sem: longblob # motor unit firing rate standard error (spikes/s)
+    motor_unit_psth_var: longblob # motor unit firing rate variance (spikes/s)**2
     """
 
     # limit conditions with good trials
@@ -498,7 +499,8 @@ class MotorUnitPsth(dj.Computed):
         # update key with psth and standard error
         key.update(
             motor_unit_psth=rates.mean(axis=0),
-            motor_unit_psth_sem=rates.std(axis=0, ddof=(1 if rates.shape[0] > 1 else 0))/np.sqrt(rates.shape[0])
+            motor_unit_psth_sem=rates.std(axis=0, ddof=(1 if rates.shape[0] > 1 else 0))/np.sqrt(rates.shape[0]),
+            motor_unit_psth_var=rates.var(axis=0),
         )
 
         # insert motor unit PSTH
@@ -517,7 +519,7 @@ class MotorUnitPsth(dj.Computed):
         Args:
             fs (int, optional): Sample rate. If not None, or if different sample rates across recordings, resamples PSTHs to new rate. Defaults to None.
             soft_normalize (int, optional): If not None, normalizes data with this value added to the firing rate range. Defaults to None.
-            mean_center (bool, optional): Whether to subtract the cross-condition mean from the responses. Defaults to False.
+            mean_center (bool, optional): Whether to subtract the cross-condition Mean from the responses. Defaults to False.
             output_format (str, optional): Output data format. Options: 
                 * 'array' (N x CT) [Default]
                 * 'dict' (list of dictionaries per motor unit/condition)
@@ -598,7 +600,7 @@ class MotorUnitPsth(dj.Computed):
             rate_range = np.hstack(psths).ptp(axis=1, keepdims=True)
             psths = [X/(rate_range + soft_normalize) for X in psths]
 
-        # mean-center
+        # Mean-center
         if mean_center:
             rate_mean = np.hstack(psths).mean(axis=1, keepdims=True)
             psths = [X - rate_mean for X in psths]

@@ -2,7 +2,7 @@
 
 import datajoint as dj
 import os, re
-from churchland_pipeline_python import acquisition, equipment, reference
+from src.churchland_pipeline_python import acquisition, equipment, reference
 from datetime import datetime
 from typing import List, Tuple
 

@@ -1,11 +1,14 @@
 import datajoint as dj
 import os, re, inspect
 import numpy as np
-from churchland_pipeline_python import lab, acquisition, equipment, reference, processing
-from churchland_pipeline_python.utilities import speedgoat, datajointutils
+from src.churchland_pipeline_python import lab, acquisition, equipment, reference, processing
+from src.churchland_pipeline_python.utilities import speedgoat, datajointutils
 from decimal import Decimal
 from functools import reduce
 from typing import Tuple, List
+import colorcet as cc
+import matplotlib.cm as mpl_cm
+import pdb
 
 DataJointTable = dj.user_tables.UserTable
 
@@ -234,6 +237,128 @@ class ConditionParams(dj.Lookup):
                 rel = self * rel
 
             return rel
+    # update condition keys with color scales and endpoint colors
+    def colorize_conditions(
+            self,
+            alpha_range: tuple=(0,1),
+            bw_range: tuple=(0.1,0.9),
+            n_sigfigs: int=2,
+    ) -> List[dict]:
+        """Add color scales and endpoint colors to condition keys."""
+
+        condition_keys = (self \
+                          * self.proj_label(n_sigfigs=n_sigfigs) \
+                          * self.proj_rank() \
+                          ).fetch(as_dict=True)
+
+        for cond_key in condition_keys:
+            _, target_force = self.target_force_profile(cond_key['condition_id'], 100)
+            cond_key.update({'condition_force': target_force})
+
+        # alpha range (for indicating time)
+        alpha_range = np.array(alpha_range)
+
+        # black-white range (for indicating start/stop amplitude)
+        bw_range = np.array(bw_range)
+
+        # hue sequence for condition types
+        condition_hue_sequence = dict(
+            Static=cc.cm.linear_blue_5_95_c73_r,
+            Ramp=cc.cm.linear_green_5_95_c69_r,
+            Sine=cc.cm.linear_wyor_100_45_c55,
+            Chirp=mpl_cm.get_cmap('Purples'),
+        )
+
+        # hue sequence for endpoints
+        endpoint_hue_sequence = cc.cm.linear_grey_0_100_c0
+
+        # force range across all conditions
+        force_range = np.array([
+            np.array([cond_key['condition_force'].min() for cond_key in condition_keys]).min(),
+            np.array([cond_key['condition_force'].max() for cond_key in condition_keys]).max()
+        ])
+
+        for condition_type, hue_sequence in condition_hue_sequence.items():
+
+            # filter condition keys by type
+            cond_set_keys = list(filter(lambda x: x['condition_label'].startswith(condition_type), condition_keys))
+
+            # infer target frequency from condition rank
+            if condition_type == 'Static':
+
+                target_freqs = np.array([0] * len(cond_set_keys))
+                freq_sample_map = {0: 0.5}
+
+            elif condition_type == 'Ramp':
+
+                # ramp "frequency" ~ rate in Newtons per second
+                target_freqs = np.array([eval(re.search('.*_(.*)_.*', cond_key['condition_rank']).group(1)) \
+                                         for cond_key in cond_set_keys])
+
+                unique_freqs = np.unique(target_freqs)
+                unique_sample_pos = np.linspace(0.1, 0.6, len(unique_freqs))
+                freq_sample_map = {freq: pos for freq, pos in zip(unique_freqs, unique_sample_pos)}
+
+            elif condition_type == 'Sine':
+
+                target_freqs = np.array([eval(re.search('.*_(.*)_.*_.*', cond_key['condition_rank']).group(1)) \
+                                         for cond_key in cond_set_keys])
+
+                unique_freqs = np.unique(target_freqs)
+                unique_sample_pos = np.linspace(0, 1, len(unique_freqs))
+                freq_sample_map = {freq: pos for freq, pos in zip(unique_freqs, unique_sample_pos)}
+
+            elif condition_type == 'Chirp':
+
+                # only get the final frequency
+                target_freqs = np.array([eval(re.search('.*_.*_(.*)_.*_.*', cond_key['condition_rank']).group(1)) \
+                                         for cond_key in cond_set_keys])
+
+                unique_freqs = np.unique(target_freqs)
+                unique_sample_pos = np.linspace(0.75, 1, len(unique_freqs))
+                freq_sample_map = {freq: pos for freq, pos in zip(unique_freqs, unique_sample_pos)}
+
+            else:
+                print('target type {} unrecognized'.format(condition_type))
+                return
+
+            # determine hue sample position from target frequencies
+            hue_sample_pos = [freq_sample_map[freq] for freq in target_freqs]
+
+            color_maps = [np.round(255 * np.array(hue_sequence(samp_pos))).astype(int)[:3]
+                          for samp_pos, cond_key in zip(hue_sample_pos, cond_set_keys)]
+
+            # assign color scales from color maps
+            color_scales = [
+                [
+                    [0, 'rgba({},{},{},{})'.format(*(list(cm) + list(alpha_range[[0]])))],
+                    [1, 'rgba({},{},{},{})'.format(*(list(cm) + list(alpha_range[[1]])))],
+                ]
+                for cm in color_maps
+            ]
+
+            # set initial and final marker colors based on force endpoints
+            force_endpts = np.array([cond_key['condition_force'][[0, -1]] for cond_key in cond_set_keys])
+            force_endpts_scaled = (force_endpts - force_range.min())/force_range.ptp() * bw_range.ptp() + bw_range.min()
+
+            endpoint_hues = [np.atleast_2d(np.round(255 * np.array(endpoint_hue_sequence(1-x))).astype(int))[:,:3]
+                             for x in force_endpts_scaled.T]
+
+            init_marker_colors = ['rgb({},{},{})'.format(*end_hue) for end_hue in endpoint_hues[0]]
+            final_marker_colors = ['rgb({},{},{})'.format(*end_hue) for end_hue in endpoint_hues[1]]
+
+            # update keys with color scale and marker colors
+            [csk.update(color_scale=cs, init_marker_color=imc, final_marker_color=fmc) \
+             for csk, cs, imc, fmc in zip(cond_set_keys, color_scales, init_marker_colors, final_marker_colors)];
+
+        condition_colors = {}
+        keep_attrs = ['condition_label','color_scale','init_marker_color','final_marker_color']
+        for cond_key in condition_keys:
+            condition_colors.update({
+                cond_key['condition_id']: {k:v for k,v in cond_key.items() if k in keep_attrs}
+            })
+
+        return condition_colors
 
 
     def proj_label(self, n_sigfigs: int=4):
@@ -282,7 +407,7 @@ class ConditionParams(dj.Lookup):
         condition_counts = self.aggr(table, count='count(*)')
 
         # restrict by most counts
-        max_count = dj.U().aggr(condition_counts, count='max(count)').fetch1('count')
+        max_count = dj.U().aggr(condition_counts, count='Max(count)').fetch1('count')
         self = self & (condition_counts & 'count={}'.format(max_count)).proj()
 
         if include is not None:
@@ -336,11 +461,18 @@ class ConditionParams(dj.Lookup):
         """
 
         # force attributes
-        force_attr = dict(
-            force_max = params['frcMax'], 
-            force_offset = params['frcOff'],
-            force_inverted = params['frcPol']==-1
-        )
+        try:
+            force_attr = dict(
+                force_max=params['frcMax'],
+                force_offset=params['frcOff'],
+                force_inverted=params['frcPol']==-1
+            )
+        except KeyError:
+            force_attr = dict(
+                force_max=params['frcMax'],
+                force_offset=0,
+                force_inverted=params['frcPol']==-1
+            )
 
         cond_rel = self.Force
 
@@ -561,6 +693,10 @@ class Behavior(dj.Imported):
         reward:            longblob         # TTL signal indicating the delivery of juice reward
         photobox:          longblob         # photobox signal
         stim = null:       longblob         # TTL signal indicating the delivery of a stim pulse
+        perturbation_offset = null: longblob # external perturbation sizes
+        force_x_raw = null: longblob # x component of force when using multiaxis load cell
+        force_y_raw = null: longblob # y component of force when using multiaxis load cell
+        force_z_raw = null: longblob # z component of force when using multiaxis load cell
         """
 
         def process_force(self, data_type='raw', apply_filter=True, keep_keys=False):
@@ -635,15 +771,25 @@ class Behavior(dj.Imported):
             # summary file path
             summary_file_path = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'summary'})\
                 .proj_file_path().fetch1('behavior_file_path')
+            from scripts.utilities import find_char
 
             # ensure local path
             summary_file_path = reference.EngramTier.ensure_local(summary_file_path)
+            ids = list(find_char(summary_file_path, '/'))
+            summary_file_dir = summary_file_path[:ids[-1]]
 
             # read summary file
-            summary = speedgoat.read_task_states(summary_file_path)
 
-            # update task states
-            TaskState.insert(summary, skip_duplicates=True)
+            summary_class = speedgoat.SpeedgoatParser(summary_file_dir)
+            summary = summary_class.task_states
+            for sum_key in summary:
+                TaskState.insert1({'task_state_id': summary[sum_key],
+                                   'task_state_name': sum_key}, skip_duplicates=True)
+            # pdb.set_trace()
+            # summary = speedgoat.read_task_states(summary_file_path)
+            #
+            # # update task states
+            # TaskState.insert(summary, skip_duplicates=True)
 
             # parameter and data file paths
             params_file_paths = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'params'})\
@@ -669,7 +815,7 @@ class Behavior(dj.Imported):
 
                 else:
                     # read params file
-                    params = speedgoat.read_trial_params(params_path)
+                    params = summary_class.read_trial_params(int(trial))
 
                     if not params:
                         continue
@@ -681,6 +827,7 @@ class Behavior(dj.Imported):
                     all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
                     
                     # insert new condition if none exists
+                    all_cond_attr.pop('force_offset')
                     if not(cond_rel & all_cond_attr):
 
                         # insert condition table
@@ -729,7 +876,8 @@ class Behavior(dj.Imported):
                     print('Missing parameters file for trial {}'.format(trial))
                 else:
                     # convert params to condition keys
-                    params = speedgoat.read_trial_params(params_path)
+                    params = summary_class.read_trial_params(int(trial))
+
 
                     if not params:
                         continue
@@ -737,11 +885,296 @@ class Behavior(dj.Imported):
                     cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
 
                     # read data
-                    data = speedgoat.read_trial_data(data_path, success_state, fs)
-
+                    # data = speedgoat.read_trial_data(data_path, success_state, fs)
+                    data = summary_class.read_trial_data(int(trial))
                     if not data:
                         continue
-                        
+                    if 'perturbation_offset' in data:
+                        data['perturbation_offset'] = np.nan_to_num(data['perturbation_offset'])
+
+                    if not 'force_filt_online' in data:
+                        filtered_force = (data['cursor_position'] - (1 - params['gain'])/2) \
+                                         * params['frcMax']/params['gain']
+                        data['force_filt_online'] = filtered_force
+                        data['force_raw_online'] = data['force_x_raw']
+                    pdb.set_trace()
+                    # aggregate condition part table parameters into a single dictionary
+                    all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
+
+                    # insert condition data
+                    cond_id = (cond_rel & all_cond_attr).fetch1('condition_id')
+                    cond_key = dict(**key, condition_id=cond_id)
+                    if not(self.Condition & cond_key):
+                        t, force = ConditionParams.target_force_profile(cond_id, fs)
+                        cond_key.update(condition_time=t, condition_force=force)
+                        self.Condition.insert1(cond_key, allow_direct_insert=True)
+
+                    # insert save tag key
+                    save_tag_key = dict(**key, save_tag=params['saveTag'])
+                    if not (self.SaveTag & save_tag_key):
+                        self.SaveTag.insert1(save_tag_key)
+
+                    # insert trial data
+                    pdb.set_trace()
+                    trial_key = dict(**key, trial=trial, condition_id=cond_id, **data, save_tag=params['saveTag'])
+                    self.Trial.insert1(trial_key)
+
+        else: 
+            print('Unrecognized task controller')
+            return None
+
+
+@schema
+class BehaviorDev(dj.Imported):
+    definition = """
+    # Behavioral data imported from Speedgoat
+    -> acquisition.BehaviorRecording
+    """
+
+    key_source = acquisition.BehaviorRecording
+
+    class Condition(dj.Part):
+        definition = """
+        # Condition data
+        -> master
+        -> ConditionParams
+        ---
+        condition_time:  longblob # condition time vector (s)
+        condition_force: longblob # condition force profile (N)
+        """
+
+    class SaveTag(dj.Part):
+        definition = """
+        # Save tags and associated notes
+        -> master
+        save_tag: tinyint unsigned # save tag number
+        """
+
+    class Trial(dj.Part):
+        definition = """
+        # Trial data
+        -> master.Condition
+        trial:             smallint unsigned # session trial number
+        ---
+        -> master.SaveTag
+        successful_trial:  bool             # whether the trial was successful
+        simulation_time:   longblob         # task model simulation time
+        task_state:        longblob         # task state IDs
+        force_raw_online:  longblob         # amplified output of load cell
+        force_filt_online: longblob         # online (boxcar) filtered and normalized force used to control Pac-Man
+        reward:            longblob         # TTL signal indicating the delivery of juice reward
+        photobox:          longblob         # photobox signal
+        stim = null:       longblob         # TTL signal indicating the delivery of a stim pulse
+        perturbation_offset = null: longblob # external perturbation sizes
+        force_x_raw = null: longblob # x component of force when using multiaxis load cell
+        force_y_raw = null: longblob # y component of force when using multiaxis load cell
+        force_z_raw = null: longblob # z component of force when using multiaxis load cell
+        """
+
+        def process_force(self, data_type='raw', apply_filter=True, keep_keys=False):
+
+            # aggregate load cell parameters per session
+            load_cell_params = (acquisition.Session.Hardware & {'hardware': '5lb Load Cell'}) * equipment.Hardware.Parameter & self
+
+            force_capacity_per_session = dj.U(*acquisition.Session.primary_key) \
+                .aggr((load_cell_params & {'equipment_parameter': 'force capacity'}), force_capacity='equipment_parameter_value')
+
+            voltage_output_per_session = dj.U(*acquisition.Session.primary_key) \
+                .aggr((load_cell_params & {'equipment_parameter': 'voltage output'}), voltage_output='equipment_parameter_value')
+
+            load_cell_params_per_session = force_capacity_per_session * voltage_output_per_session
+
+            # 25 ms Gaussian filter
+            filter_rel = processing.Filter.Gaussian & {'sd':25e-3, 'width':4}
+
+            # join trial force data with force and load cell parameters
+            force_rel = self * ConditionParams.Force * load_cell_params_per_session
+
+            # fetch force data
+            data_type_attr = {'raw':'force_raw_online', 'filt':'force_filt_online'}
+            data_attr = data_type_attr[data_type]
+            force_data = force_rel \
+                .proj(data_attr, 'force_max', 'force_offset', 'force_capacity', 'voltage_output') \
+                .fetch(as_dict=True, order_by='trial')
+
+            # sample rate
+            fs = (acquisition.BehaviorRecording & self).fetch1('behavior_recording_sample_rate')
+
+            # process trial data
+            for f in force_data:
+
+                f[data_attr] = f[data_attr].copy()
+
+                # normalize force (V) by load cell capacity (V)
+                f[data_attr] /= f['voltage_output']
+
+                # convert force to proportion of maximum load cell output (N)
+                f[data_attr] *= f['force_capacity']/f['force_max']
+
+                # subtract baseline force (N)
+                f[data_attr] -= float(f['force_offset'])
+
+                # multiply force by maximum gain (N)
+                f[data_attr] *= f['force_max']
+
+                # filter
+                if apply_filter:
+                    f[data_attr] = filter_rel.filt(f[data_attr], fs)
+
+            # pop force parameters
+            for key in ['force_id', 'force_max', 'force_offset', 'force_capacity', 'voltage_output']:
+                [f.pop(key) for f in force_data]
+
+            # limit output to force signal
+            if not keep_keys:
+                force_data = np.array([f[data_attr] for f in force_data])
+
+            return force_data
+
+    def make(self, key):
+
+        self.insert1(key)
+
+        if (acquisition.Session.Hardware & key & {'hardware': 'Speedgoat'}):
+
+            # behavior sample rate
+            fs = int((acquisition.BehaviorRecording & key).fetch1('behavior_recording_sample_rate'))
+
+            # summary file path
+            summary_file_path = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'summary'}) \
+                .proj_file_path().fetch1('behavior_file_path')
+            from scripts.utilities import find_char
+
+            # ensure local path
+            summary_file_path = reference.EngramTier.ensure_local(summary_file_path)
+            ids = list(find_char(summary_file_path, '/'))
+            summary_file_dir = summary_file_path[:ids[-1]]
+
+            # read summary file
+
+            summary_class = speedgoat.SpeedgoatParser(summary_file_dir)
+            summary = summary_class.task_states
+            for sum_key in summary:
+                TaskState.insert1({'task_state_id': summary[sum_key],
+                                   'task_state_name': sum_key}, skip_duplicates=True)
+            # pdb.set_trace()
+            # summary = speedgoat.read_task_states(summary_file_path)
+            #
+            # # update task states
+            # TaskState.insert(summary, skip_duplicates=True)
+
+            # parameter and data file paths
+            params_file_paths = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'params'}) \
+                .proj_file_path().fetch('behavior_file_path')
+
+            data_file_paths = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'data'}) \
+                .proj_file_path().fetch('behavior_file_path')
+
+            # ensure local paths
+            params_file_paths = [reference.EngramTier.ensure_local(pth) for pth in params_file_paths]
+            data_file_paths = [reference.EngramTier.ensure_local(pth) for pth in data_file_paths]
+
+            # populate conditions from parameter files
+            for params_path in params_file_paths:
+
+                # trial number
+                trial = re.search(r'beh_(\d*)', params_path).group(1)
+
+                # ensure matching data file exists
+                if params_path.replace('params','data') not in data_file_paths:
+
+                    print('Missing data file for trial {}'.format(trial))
+
+                else:
+                    # read params file
+                    params = summary_class.read_trial_params(int(trial))
+
+                    if not params:
+                        continue
+
+                    # extract condition attributes from params file
+                    cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
+
+                    # aggregate condition part table parameters into a single dictionary
+                    all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
+
+                    # insert new condition if none exists
+                    all_cond_attr.pop('force_offset')
+                    if not(cond_rel & all_cond_attr):
+
+                        # insert condition table
+                        new_cond_id = datajointutils.next_unique_int(ConditionParams, 'condition_id')
+                        cond_key = {'condition_id': new_cond_id}
+
+                        ConditionParams.insert1(cond_key)
+
+                        # insert Force, Stim, and Target tables
+                        for cond_part_name in ['Force', 'Stim', 'Target']:
+
+                            # attributes for part table
+                            cond_part_attr = cond_attr[cond_part_name]
+
+                            if not(cond_part_attr):
+                                continue
+
+                            cond_part_rel = getattr(ConditionParams, cond_part_name)
+                            cond_part_id = cond_part_name.lower() + '_id'
+
+                            if not(cond_part_rel & cond_part_attr):
+
+                                cond_part_attr[cond_part_id] = datajointutils.next_unique_int(cond_part_rel, cond_part_id)
+
+                            else:
+                                cond_part_attr[cond_part_id] = (cond_part_rel & cond_part_attr).fetch(cond_part_id, limit=1)[0]
+
+                            cond_part_rel.insert1(dict(**cond_key, **cond_part_attr))
+
+                        # insert target type table
+                        targ_type_rel.insert1(dict(**cond_key, **cond_attr['TargetType'], target_id=cond_attr['Target']['target_id']))
+
+
+            # populate trials from data files
+            success_state = (TaskState() & 'task_state_name="Success"').fetch1('task_state_id')
+
+            for data_path in data_file_paths:
+
+                # trial number
+                trial = int(re.search(r'beh_(\d*)',data_path).group(1))
+
+                # find matching parameters file
+                try:
+                    params_path = next(filter(lambda f: data_path.replace('data','params')==f, params_file_paths))
+                except StopIteration:
+                    print('Missing parameters file for trial {}'.format(trial))
+                else:
+                    # convert params to condition keys
+                    params = summary_class.read_trial_params(int(trial))
+
+                    if not 'gain' in params:
+                        params['gain'] = 1
+
+                    if not params:
+                        continue
+
+                    cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
+
+                    # read data
+                    # data = speedgoat.read_trial_data(data_path, success_state, fs)
+                    data = summary_class.read_trial_data(int(trial))
+                    if not data:
+                        continue
+                    if 'perturbation_offset' in data:
+                        data['perturbation_offset'] = np.nan_to_num(data['perturbation_offset'])
+
+                    if not 'force_filt_online' in data:
+                        filtered_force = (data['cursor_position'] - (1 - params['gain'])/2) \
+                                         * params['frcMax']/params['gain']
+                        data['force_filt_online'] = filtered_force
+                        if not np.isnan(data['force_x_raw']).any():
+                            data['force_raw_online'] = data['force_x_raw']
+                        else:
+                            data['force_raw_online'] = data['force_y_raw']
+                        data.pop('cursor_position')
                     # aggregate condition part table parameters into a single dictionary
                     all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
 
@@ -760,8 +1193,8 @@ class Behavior(dj.Imported):
 
                     # insert trial data
                     trial_key = dict(**key, trial=trial, condition_id=cond_id, **data, save_tag=params['saveTag'])
-                    self.Trial.insert1(trial_key)
+                self.Trial.insert1(trial_key)
 
-        else: 
+        else:
             print('Unrecognized task controller')
             return None

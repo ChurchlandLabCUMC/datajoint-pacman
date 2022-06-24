@@ -6,13 +6,13 @@ import pandas as pd
 import numpy as np
 import neo
 import progressbar
-from churchland_pipeline_python import acquisition, action, equipment, lab, processing, reference
-from churchland_pipeline_python.utilities import datajointutils
-from pacman_pipeline_python import pacman_acquisition, pacman_processing, pacman_behavior, pacman_brain, pacman_muscle
+from src.churchland_pipeline_python import acquisition, action, equipment, lab, processing, reference
+from src.churchland_pipeline_python.utilities import datajointutils
+from src.pacman_pipeline_python import pacman_acquisition, pacman_processing, pacman_behavior, pacman_brain, pacman_muscle
 from . import datasynthesis
 from datetime import datetime
 from typing import List, Tuple
-
+import pdb
 
 # =======
 # SESSION
@@ -153,12 +153,13 @@ def behaviorrecording(behavior_sample_rate: int=1e3, display_progress: bool=True
 
         # split files by extension
         behavior_file_parts = [x.split(sep='.') for x in behavior_files]
-
         # behavior file keys
+
         behavior_file_keys = [
             dict(**session_key, behavior_file_id=idx, behavior_file_path='', behavior_file_name=x[0], behavior_file_extension=x[1]) \
                 for idx, x in enumerate(behavior_file_parts)
             ]
+
         
         # insert behavior recording
         acquisition.BehaviorRecording.insert1(dict(

@@ -1,12 +1,16 @@
 import itertools, re
+import pdb
+
 import datajoint as dj
 import numpy as np
 import pandas as pd
+import xarray
 import xarray as xr
-from churchland_pipeline_python import acquisition
+from src.churchland_pipeline_python import acquisition
 from sklearn import decomposition
 from typing import List
 from .. import pacman_acquisition
+
 
 class NeuroDataArrayConstructor:
 
@@ -153,7 +157,7 @@ class NeuroDataArrayConstructor:
             if all(isinstance(X,int) or isinstance(X,str) for X in session_unit_ids):
                 reformatted_unit_ids.append([[('unit',uid)] for uid in session_unit_ids])
         self.unit_ids = reformatted_unit_ids
-    
+
     def _set_default_condition_ids(self):
         self.condition_ids = [[('condition',cid)] for cid in range(self._data_stats['n_conditions'])]
 
@@ -269,6 +273,7 @@ class NeuroDataArrayConstructor:
 
         return cls(session_data, unit_ids, condition_ids, new_condition_times, data_name, new_sample_rate)
 
+
 class NeuroDataArray(NeuroDataArrayConstructor):
 
     def __init__(
@@ -290,9 +295,9 @@ class NeuroDataArray(NeuroDataArrayConstructor):
         )
 
     def mean_center(self, only_vars: list=None, reference_var: str=None):
-        """Centers each data array by its cross-condition mean.
+        """Centers each data array by its cross-condition Mean.
         If only_vars is provided, centering will only be applied to the corresponding arrays.
-        If reference_var is provided, centering uses the cross-condition mean of the corresponding array."""
+        If reference_var is provided, centering uses the cross-condition Mean of the corresponding array."""
         data_vars = list(self.data_set.data_vars)
         if only_vars is not None:
             unrecognized_variables = list(set(only_vars) - set(data_vars))
@@ -336,11 +341,9 @@ class NeuroDataArray(NeuroDataArrayConstructor):
         """Projects a data array into its principal component space and saves as a new data array.
         If condition_ids is provided, uses those IDs to get the principal components.
         Limits PCA to the top max_components, if provided.
-        Note: resets the data set, then mean centers and (soft) normalizes the source data array with soft_factor."""
-        condition_time_dim_name = next(index for index in list(self.data_set.indexes) if re.match(r'.*time',index))
-        condition_dim_name = re.match(r'(.*)_time', condition_time_dim_name).group(1)
+        Note: resets the data set, then Mean centers and (soft) normalizes the source data array with soft_factor."""
         if condition_ids is None:
-            condition_ids = np.unique(self.data_set[condition_dim_name].values)
+            condition_ids = np.unique(self.data_set['condition_id'].values)
 
         self.reset_data_set()
         self.mean_center(only_vars=[var_name])
@@ -348,30 +351,38 @@ class NeuroDataArray(NeuroDataArrayConstructor):
 
         subspace_data = self.data_set[var_name].sel(condition_time=(condition_ids, np.s_[::])).values
         pca = decomposition.PCA(n_components=max_components).fit(subspace_data.T)
+        self.pc_components_ = pca.components_
         data_projection = pca.components_ @ self.data_set[var_name].values
 
         self.data_set[var_name + '_projection'] = xr.DataArray(
             data_projection,
             coords = [
                 ('principal_component', 1+np.arange(pca.components_.shape[0])),
-                (condition_time_dim_name, self.data_set.indexes[condition_time_dim_name])
+                ('condition_time', self.data_set.indexes['condition_time'])
             ],
             attrs = {'subspace_condition_ids': condition_ids}
         )
         
     def reorder_conditions(self, sorted_condition_ids: list):
         """Down selects and reorders data set by provided condition IDs."""
-        condition_time_dim_name = next(index for index in list(self.data_set.indexes) if re.match(r'.*time',index))
-        condition_dim_name = re.match(r'(.*)_time', condition_time_dim_name).group(1)
-
-        ct_indexes = np.vstack([np.array(ct) for ct in self.data_set.indexes[condition_time_dim_name]])
+        ct_indexes = np.vstack([np.array(ct) for ct in self.data_set.indexes['condition_time']])
         sorted_ct_indexes = np.vstack([ct_indexes[ct_indexes[:,0]==cid,:] for cid in sorted_condition_ids])
         sorted_ct_indexes = [ct for ct in sorted_ct_indexes.T]
         sorted_ct_indexes[0] = sorted_ct_indexes[0].astype(int)
-        new_ct_indexes = pd.MultiIndex.from_arrays(sorted_ct_indexes, names=[condition_dim_name, 'time'])
+        new_ct_indexes = pd.MultiIndex.from_arrays(sorted_ct_indexes, names=['condition_id', 'time'])
         self.data_set = self.data_set.reindex(condition_time=new_ct_indexes)
 
     def trial_average(self, n_folds: int=1):
         assert 'trial' in self.data_set.coords, 'Only applicable for multi-trial data'
         fold_ids = np.tile(np.arange(n_folds), np.ceil(self.data_set.dims['trial']/n_folds).astype(int))[:self.data_set.dims['trial']]
-        self.data_set = self.data_set.assign_coords(fold=('trial', fold_ids)).groupby('fold').mean(dim='trial', skipna=True)
+        self.data_set = self.data_set.assign_coords(fold=('trial', fold_ids)).groupby('fold').Mean(dim='trial', skipna=True)
+
+    def restrict_group(self, var_name: str = None, conditon_list: list = None) -> xarray.Dataset:
+        data_set = self.data_set[var_name].where(self.data_set.condition_id.isin(conditon_list), drop=True)
+        return data_set
+
+def main():
+    pass
+
+if __name__ == '__main__':
+    main()

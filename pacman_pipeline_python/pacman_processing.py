@@ -5,8 +5,8 @@ import numpy as np
 import neo
 import progressbar
 import matplotlib.pyplot as plt
-from churchland_pipeline_python import lab, acquisition, processing
-from churchland_pipeline_python.utilities import datasync, datajointutils
+from src.churchland_pipeline_python import lab, acquisition, processing
+from src.churchland_pipeline_python.utilities import datasync, datajointutils
 from . import pacman_acquisition
 from datetime import datetime
 from sklearn import decomposition
@@ -325,7 +325,7 @@ class BehaviorTrialAlignment(dj.Computed):
             # process force signal
             force = trial_rel.process_force()[0]
 
-            # compute normalized mean squared error for each lag
+            # compute normalized Mean squared error for each lag
             nmse = np.full(1+2*max_lag_samp, -np.inf)
             for idx, lag in enumerate(lags):
                 if (align_idx + lag + align_idx_trunc[-1]) < len(force):

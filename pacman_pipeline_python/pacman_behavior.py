@@ -4,8 +4,8 @@ import pandas as pd
 import numpy as np
 import scipy
 import matplotlib.pyplot as plt
-from churchland_pipeline_python import lab, acquisition, processing
-from churchland_pipeline_python.utilities import datajointutils
+from src.churchland_pipeline_python import lab, acquisition, processing
+from src.churchland_pipeline_python.utilities import datajointutils
 from . import pacman_acquisition, pacman_processing
 from sklearn import decomposition
 from typing import Any, List, Tuple
@@ -88,9 +88,9 @@ class ForceMean(dj.Computed):
     -> pacman_processing.FilterParams
     ---
     force_raw_mean:  longblob # trial-averaged raw (online), aligned force signal (V)
-    force_raw_sem:   longblob # raw mean force standard error
+    force_raw_sem:   longblob # raw Mean force standard error
     force_filt_mean: longblob # trial-averaged filtered, aligned, and calibrated force (N)
-    force_filt_sem:  longblob # filtered mean force standard error
+    force_filt_sem:  longblob # filtered Mean force standard error
     """
 
     # limit conditions with good trials
@@ -108,7 +108,7 @@ class ForceMean(dj.Computed):
         force_raw = np.stack(force_raw)
         force_filt = np.stack(force_filt)
 
-        # update key with mean and standard error
+        # update key with Mean and standard error
         key.update(
             force_raw_mean=force_raw.mean(axis=0),
             force_raw_sem=force_raw.std(axis=0, ddof=(1 if force_raw.shape[0] > 1 else 0))/np.sqrt(force_raw.shape[0]),
@@ -132,7 +132,7 @@ class ForceMean(dj.Computed):
         Args:
             fs (int, optional): Sample rate. If not None, or if different sample rates across recordings, resamples forces to new rate. Defaults to None.
             soft_normalize (int, optional): If not None, normalizes data with this value added to the force range. Defaults to None.
-            mean_center (bool, optional): Whether to subtract the cross-condition mean from the responses. Defaults to False.
+            mean_center (bool, optional): Whether to subtract the cross-condition Mean from the responses. Defaults to False.
             output_format (str, optional): Output data format. Options: 
                 * 'array' (N x CT) [Default]
                 * 'dict' (list of dictionaries per force session/condition)
@@ -150,7 +150,7 @@ class ForceMean(dj.Computed):
         # ensure that there is one force per session/condition
         force_condtion_keys = pacman_acquisition.Behavior.Condition.primary_key
         remaining_keys = list(set(self.primary_key) - set(force_condtion_keys))
-        
+
         n_forces_per_condition = dj.U(*force_condtion_keys).aggr(self, count='count(*)')
         assert not(n_forces_per_condition & 'count > 1'), 'More than one force per force channel and condition. Check ' \
             + (', '.join(['{}'] * len(remaining_keys))).format(*remaining_keys)
@@ -214,7 +214,7 @@ class ForceMean(dj.Computed):
             signal_range = np.hstack(forces).ptp(axis=1, keepdims=True)
             forces = [X/(signal_range + soft_normalize) for X in forces]
 
-        # mean-center
+        # Mean-center
         if mean_center:
             signal_mean = np.hstack(forces).mean(axis=1, keepdims=True)
             forces = [X - signal_mean for X in forces]
