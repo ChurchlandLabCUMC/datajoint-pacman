@@ -1,8 +1,8 @@
 import datajoint as dj
 import os, re, inspect
 import numpy as np
-from src.churchland_pipeline_python import lab, acquisition, equipment, reference, processing
-from src.churchland_pipeline_python.utilities import speedgoat, datajointutils
+from churchland_pipeline_python import lab, acquisition, equipment, reference, processing
+from churchland_pipeline_python.utilities import speedgoat, datajointutils
 from decimal import Decimal
 from functools import reduce
 from typing import Tuple, List
@@ -651,281 +651,9 @@ class TaskState(dj.Lookup):
 # =======
 # LEVEL 1
 # =======
-    
+
 @schema
 class Behavior(dj.Imported):
-    definition = """
-    # Behavioral data imported from Speedgoat
-    -> acquisition.BehaviorRecording
-    """
-
-    key_source = acquisition.BehaviorRecording
-
-    class Condition(dj.Part):
-        definition = """
-        # Condition data
-        -> master
-        -> ConditionParams
-        ---
-        condition_time:  longblob # condition time vector (s)
-        condition_force: longblob # condition force profile (N)
-        """
-
-    class SaveTag(dj.Part):
-        definition = """
-        # Save tags and associated notes
-        -> master
-        save_tag: tinyint unsigned # save tag number
-        """
-
-    class Trial(dj.Part):
-        definition = """
-        # Trial data
-        -> master.Condition
-        trial:             smallint unsigned # session trial number
-        ---
-        -> master.SaveTag
-        successful_trial:  bool             # whether the trial was successful
-        simulation_time:   longblob         # task model simulation time
-        task_state:        longblob         # task state IDs
-        force_raw_online:  longblob         # amplified output of load cell
-        force_filt_online: longblob         # online (boxcar) filtered and normalized force used to control Pac-Man
-        reward:            longblob         # TTL signal indicating the delivery of juice reward
-        photobox:          longblob         # photobox signal
-        stim = null:       longblob         # TTL signal indicating the delivery of a stim pulse
-        perturbation_offset = null: longblob # external perturbation sizes
-        force_x_raw = null: longblob # x component of force when using multiaxis load cell
-        force_y_raw = null: longblob # y component of force when using multiaxis load cell
-        force_z_raw = null: longblob # z component of force when using multiaxis load cell
-        """
-
-        def process_force(self, data_type='raw', apply_filter=True, keep_keys=False):
-
-            # aggregate load cell parameters per session
-            load_cell_params = (acquisition.Session.Hardware & {'hardware': '5lb Load Cell'}) * equipment.Hardware.Parameter & self
-
-            force_capacity_per_session = dj.U(*acquisition.Session.primary_key) \
-                .aggr((load_cell_params & {'equipment_parameter': 'force capacity'}), force_capacity='equipment_parameter_value')
-
-            voltage_output_per_session = dj.U(*acquisition.Session.primary_key) \
-                .aggr((load_cell_params & {'equipment_parameter': 'voltage output'}), voltage_output='equipment_parameter_value')
-
-            load_cell_params_per_session = force_capacity_per_session * voltage_output_per_session
-
-            # 25 ms Gaussian filter
-            filter_rel = processing.Filter.Gaussian & {'sd':25e-3, 'width':4}
-
-            # join trial force data with force and load cell parameters
-            force_rel = self * ConditionParams.Force * load_cell_params_per_session
-
-            # fetch force data
-            data_type_attr = {'raw':'force_raw_online', 'filt':'force_filt_online'}
-            data_attr = data_type_attr[data_type]
-            force_data = force_rel \
-                .proj(data_attr, 'force_max', 'force_offset', 'force_capacity', 'voltage_output') \
-                .fetch(as_dict=True, order_by='trial')
-
-            # sample rate
-            fs = (acquisition.BehaviorRecording & self).fetch1('behavior_recording_sample_rate')
-
-            # process trial data
-            for f in force_data:
-
-                f[data_attr] = f[data_attr].copy()
-
-                # normalize force (V) by load cell capacity (V)
-                f[data_attr] /= f['voltage_output']
-
-                # convert force to proportion of maximum load cell output (N)
-                f[data_attr] *= f['force_capacity']/f['force_max']
-
-                # subtract baseline force (N)
-                f[data_attr] -= float(f['force_offset'])
-
-                # multiply force by maximum gain (N)
-                f[data_attr] *= f['force_max']
-
-                # filter
-                if apply_filter:
-                    f[data_attr] = filter_rel.filt(f[data_attr], fs)
-
-            # pop force parameters
-            for key in ['force_id', 'force_max', 'force_offset', 'force_capacity', 'voltage_output']:
-                [f.pop(key) for f in force_data]
-
-            # limit output to force signal
-            if not keep_keys:
-                force_data = np.array([f[data_attr] for f in force_data])
-
-            return force_data            
-        
-    def make(self, key):
-
-        self.insert1(key)
-
-        if (acquisition.Session.Hardware & key & {'hardware': 'Speedgoat'}):
-
-            # behavior sample rate
-            fs = int((acquisition.BehaviorRecording & key).fetch1('behavior_recording_sample_rate'))
-
-            # summary file path
-            summary_file_path = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'summary'})\
-                .proj_file_path().fetch1('behavior_file_path')
-            from scripts.utilities import find_char
-
-            # ensure local path
-            summary_file_path = reference.EngramTier.ensure_local(summary_file_path)
-            ids = list(find_char(summary_file_path, '/'))
-            summary_file_dir = summary_file_path[:ids[-1]]
-
-            # read summary file
-
-            summary_class = speedgoat.SpeedgoatParser(summary_file_dir)
-            summary = summary_class.task_states
-            for sum_key in summary:
-                TaskState.insert1({'task_state_id': summary[sum_key],
-                                   'task_state_name': sum_key}, skip_duplicates=True)
-            # pdb.set_trace()
-            # summary = speedgoat.read_task_states(summary_file_path)
-            #
-            # # update task states
-            # TaskState.insert(summary, skip_duplicates=True)
-
-            # parameter and data file paths
-            params_file_paths = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'params'})\
-                .proj_file_path().fetch('behavior_file_path')
-
-            data_file_paths = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'data'})\
-                .proj_file_path().fetch('behavior_file_path')
-
-            # ensure local paths
-            params_file_paths = [reference.EngramTier.ensure_local(pth) for pth in params_file_paths]
-            data_file_paths = [reference.EngramTier.ensure_local(pth) for pth in data_file_paths]
-
-            # populate conditions from parameter files
-            for params_path in params_file_paths:
-
-                # trial number
-                trial = re.search(r'beh_(\d*)', params_path).group(1)
-
-                # ensure matching data file exists
-                if params_path.replace('params','data') not in data_file_paths:
-
-                    print('Missing data file for trial {}'.format(trial))
-
-                else:
-                    # read params file
-                    params = summary_class.read_trial_params(int(trial))
-
-                    if not params:
-                        continue
-
-                    # extract condition attributes from params file
-                    cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
-
-                    # aggregate condition part table parameters into a single dictionary
-                    all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
-                    
-                    # insert new condition if none exists
-                    all_cond_attr.pop('force_offset')
-                    if not(cond_rel & all_cond_attr):
-
-                        # insert condition table
-                        new_cond_id = datajointutils.next_unique_int(ConditionParams, 'condition_id')
-                        cond_key = {'condition_id': new_cond_id}
-
-                        ConditionParams.insert1(cond_key)
-
-                        # insert Force, Stim, and Target tables
-                        for cond_part_name in ['Force', 'Stim', 'Target']:
-
-                            # attributes for part table
-                            cond_part_attr = cond_attr[cond_part_name]
-
-                            if not(cond_part_attr):
-                                continue
-
-                            cond_part_rel = getattr(ConditionParams, cond_part_name)
-                            cond_part_id = cond_part_name.lower() + '_id'
-
-                            if not(cond_part_rel & cond_part_attr):
-
-                                cond_part_attr[cond_part_id] = datajointutils.next_unique_int(cond_part_rel, cond_part_id)
-                                
-                            else:
-                                cond_part_attr[cond_part_id] = (cond_part_rel & cond_part_attr).fetch(cond_part_id, limit=1)[0]
-
-                            cond_part_rel.insert1(dict(**cond_key, **cond_part_attr))
-
-                        # insert target type table
-                        targ_type_rel.insert1(dict(**cond_key, **cond_attr['TargetType'], target_id=cond_attr['Target']['target_id']))
-                    
-
-            # populate trials from data files
-            success_state = (TaskState() & 'task_state_name="Success"').fetch1('task_state_id')
-
-            for data_path in data_file_paths:
-
-                # trial number
-                trial = int(re.search(r'beh_(\d*)',data_path).group(1))
-
-                # find matching parameters file
-                try:
-                    params_path = next(filter(lambda f: data_path.replace('data','params')==f, params_file_paths))
-                except StopIteration:
-                    print('Missing parameters file for trial {}'.format(trial))
-                else:
-                    # convert params to condition keys
-                    params = summary_class.read_trial_params(int(trial))
-
-
-                    if not params:
-                        continue
-
-                    cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
-
-                    # read data
-                    # data = speedgoat.read_trial_data(data_path, success_state, fs)
-                    data = summary_class.read_trial_data(int(trial))
-                    if not data:
-                        continue
-                    if 'perturbation_offset' in data:
-                        data['perturbation_offset'] = np.nan_to_num(data['perturbation_offset'])
-
-                    if not 'force_filt_online' in data:
-                        filtered_force = (data['cursor_position'] - (1 - params['gain'])/2) \
-                                         * params['frcMax']/params['gain']
-                        data['force_filt_online'] = filtered_force
-                        data['force_raw_online'] = data['force_x_raw']
-                    pdb.set_trace()
-                    # aggregate condition part table parameters into a single dictionary
-                    all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
-
-                    # insert condition data
-                    cond_id = (cond_rel & all_cond_attr).fetch1('condition_id')
-                    cond_key = dict(**key, condition_id=cond_id)
-                    if not(self.Condition & cond_key):
-                        t, force = ConditionParams.target_force_profile(cond_id, fs)
-                        cond_key.update(condition_time=t, condition_force=force)
-                        self.Condition.insert1(cond_key, allow_direct_insert=True)
-
-                    # insert save tag key
-                    save_tag_key = dict(**key, save_tag=params['saveTag'])
-                    if not (self.SaveTag & save_tag_key):
-                        self.SaveTag.insert1(save_tag_key)
-
-                    # insert trial data
-                    pdb.set_trace()
-                    trial_key = dict(**key, trial=trial, condition_id=cond_id, **data, save_tag=params['saveTag'])
-                    self.Trial.insert1(trial_key)
-
-        else: 
-            print('Unrecognized task controller')
-            return None
-
-
-@schema
-class BehaviorDev(dj.Imported):
     definition = """
     # Behavioral data imported from Speedgoat
     -> acquisition.BehaviorRecording
@@ -1041,159 +769,162 @@ class BehaviorDev(dj.Imported):
             fs = int((acquisition.BehaviorRecording & key).fetch1('behavior_recording_sample_rate'))
 
             # summary file path
-            summary_file_path = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'summary'}) \
-                .proj_file_path().fetch1('behavior_file_path')
-            from scripts.utilities import find_char
+            if (acquisition.BehaviorRecording.File & key):
+                summary_file_path = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'summary'}) \
+                    .proj_file_path().fetch1('behavior_file_path')
+                from scripts.utilities import find_char
 
-            # ensure local path
-            summary_file_path = reference.EngramTier.ensure_local(summary_file_path)
-            ids = list(find_char(summary_file_path, '/'))
-            summary_file_dir = summary_file_path[:ids[-1]]
+                # ensure local path
+                summary_file_path = reference.EngramTier.ensure_local(summary_file_path)
+                ids = list(find_char(summary_file_path, '/'))
+                summary_file_dir = summary_file_path[:ids[-1]]
 
-            # read summary file
+                # read summary file
 
-            summary_class = speedgoat.SpeedgoatParser(summary_file_dir)
-            summary = summary_class.task_states
-            for sum_key in summary:
-                TaskState.insert1({'task_state_id': summary[sum_key],
-                                   'task_state_name': sum_key}, skip_duplicates=True)
-            # pdb.set_trace()
-            # summary = speedgoat.read_task_states(summary_file_path)
-            #
-            # # update task states
-            # TaskState.insert(summary, skip_duplicates=True)
+                summary_class = speedgoat.SpeedgoatParser(summary_file_dir)
+                summary = summary_class.task_states
+                for sum_key in summary:
+                    TaskState.insert1({'task_state_id': summary[sum_key],
+                                       'task_state_name': sum_key}, skip_duplicates=True)
+                # pdb.set_trace()
+                # summary = speedgoat.read_task_states(summary_file_path)
+                #
+                # # update task states
+                # TaskState.insert(summary, skip_duplicates=True)
 
-            # parameter and data file paths
-            params_file_paths = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'params'}) \
-                .proj_file_path().fetch('behavior_file_path')
+                # parameter and data file paths
+                params_file_paths = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'params'}) \
+                    .proj_file_path().fetch('behavior_file_path')
 
-            data_file_paths = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'data'}) \
-                .proj_file_path().fetch('behavior_file_path')
+                data_file_paths = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'data'}) \
+                    .proj_file_path().fetch('behavior_file_path')
 
-            # ensure local paths
-            params_file_paths = [reference.EngramTier.ensure_local(pth) for pth in params_file_paths]
-            data_file_paths = [reference.EngramTier.ensure_local(pth) for pth in data_file_paths]
+                # ensure local paths
+                params_file_paths = [reference.EngramTier.ensure_local(pth) for pth in params_file_paths]
+                data_file_paths = [reference.EngramTier.ensure_local(pth) for pth in data_file_paths]
 
-            # populate conditions from parameter files
-            for params_path in params_file_paths:
+                # populate conditions from parameter files
+                for params_path in params_file_paths:
 
-                # trial number
-                trial = re.search(r'beh_(\d*)', params_path).group(1)
+                    # trial number
+                    trial = re.search(r'beh_(\d*)', params_path).group(1)
 
-                # ensure matching data file exists
-                if params_path.replace('params','data') not in data_file_paths:
+                    # ensure matching data file exists
+                    if params_path.replace('params','data') not in data_file_paths:
 
-                    print('Missing data file for trial {}'.format(trial))
+                        print('Missing data file for trial {}'.format(trial))
 
-                else:
-                    # read params file
-                    params = summary_class.read_trial_params(int(trial))
+                    else:
+                        # read params file
+                        params = summary_class.read_trial_params(int(trial))
 
-                    if not params:
-                        continue
+                        if not params:
+                            continue
 
-                    # extract condition attributes from params file
-                    cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
+                        # extract condition attributes from params file
+                        cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
 
-                    # aggregate condition part table parameters into a single dictionary
-                    all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
+                        # aggregate condition part table parameters into a single dictionary
+                        all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
 
-                    # insert new condition if none exists
-                    all_cond_attr.pop('force_offset')
-                    if not(cond_rel & all_cond_attr):
+                        # insert new condition if none exists
+                        all_cond_attr.pop('force_offset')
+                        if not(cond_rel & all_cond_attr):
 
-                        # insert condition table
-                        new_cond_id = datajointutils.next_unique_int(ConditionParams, 'condition_id')
-                        cond_key = {'condition_id': new_cond_id}
+                            # insert condition table
+                            new_cond_id = datajointutils.next_unique_int(ConditionParams, 'condition_id')
+                            cond_key = {'condition_id': new_cond_id}
 
-                        ConditionParams.insert1(cond_key)
+                            ConditionParams.insert1(cond_key)
 
-                        # insert Force, Stim, and Target tables
-                        for cond_part_name in ['Force', 'Stim', 'Target']:
+                            # insert Force, Stim, and Target tables
+                            for cond_part_name in ['Force', 'Stim', 'Target']:
 
-                            # attributes for part table
-                            cond_part_attr = cond_attr[cond_part_name]
+                                # attributes for part table
+                                cond_part_attr = cond_attr[cond_part_name]
 
-                            if not(cond_part_attr):
-                                continue
+                                if not(cond_part_attr):
+                                    continue
 
-                            cond_part_rel = getattr(ConditionParams, cond_part_name)
-                            cond_part_id = cond_part_name.lower() + '_id'
+                                cond_part_rel = getattr(ConditionParams, cond_part_name)
+                                cond_part_id = cond_part_name.lower() + '_id'
 
-                            if not(cond_part_rel & cond_part_attr):
+                                if not(cond_part_rel & cond_part_attr):
 
-                                cond_part_attr[cond_part_id] = datajointutils.next_unique_int(cond_part_rel, cond_part_id)
+                                    cond_part_attr[cond_part_id] = datajointutils.next_unique_int(cond_part_rel, cond_part_id)
 
+                                else:
+                                    cond_part_attr[cond_part_id] = (cond_part_rel & cond_part_attr).fetch(cond_part_id, limit=1)[0]
+
+                                cond_part_rel.insert1(dict(**cond_key, **cond_part_attr))
+
+                            # insert target type table
+                            targ_type_rel.insert1(dict(**cond_key, **cond_attr['TargetType'], target_id=cond_attr['Target']['target_id']))
+
+
+                # populate trials from data files
+                success_state = (TaskState() & 'task_state_name="Success"').fetch1('task_state_id')
+
+                for data_path in data_file_paths:
+
+                    # trial number
+                    trial = int(re.search(r'beh_(\d*)',data_path).group(1))
+
+                    # find matching parameters file
+                    try:
+                        params_path = next(filter(lambda f: data_path.replace('data','params')==f, params_file_paths))
+                    except StopIteration:
+                        print('Missing parameters file for trial {}'.format(trial))
+                    else:
+                        # convert params to condition keys
+                        params = summary_class.read_trial_params(int(trial))
+
+                        if not params:
+                            continue
+
+                        if not 'gain' in params:
+                            params['gain'] = 1
+
+                        cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
+
+                        # read data
+                        # data = speedgoat.read_trial_data(data_path, success_state, fs)
+                        data = summary_class.read_trial_data(int(trial))
+                        if not data:
+                            continue
+                        if 'perturbation_offset' in data:
+                            data['perturbation_offset'] = np.nan_to_num(data['perturbation_offset'])
+
+                        if not 'force_filt_online' in data:
+                            filtered_force = (data['cursor_position'] - (1 - params['gain'])/2) \
+                                             * params['frcMax']/params['gain']
+                            data['force_filt_online'] = filtered_force
+                            if not np.isnan(data['force_x_raw']).any():
+                                data['force_raw_online'] = data['force_x_raw']
                             else:
-                                cond_part_attr[cond_part_id] = (cond_part_rel & cond_part_attr).fetch(cond_part_id, limit=1)[0]
+                                data['force_raw_online'] = data['force_y_raw']
+                            data.pop('cursor_position')
+                        # aggregate condition part table parameters into a single dictionary
+                        all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
 
-                            cond_part_rel.insert1(dict(**cond_key, **cond_part_attr))
+                        # insert condition data
+                        cond_id = (cond_rel & all_cond_attr).fetch1('condition_id')
+                        cond_key = dict(**key, condition_id=cond_id)
+                        if not(self.Condition & cond_key):
+                            t, force = ConditionParams.target_force_profile(cond_id, fs)
+                            cond_key.update(condition_time=t, condition_force=force)
+                            self.Condition.insert1(cond_key, allow_direct_insert=True)
 
-                        # insert target type table
-                        targ_type_rel.insert1(dict(**cond_key, **cond_attr['TargetType'], target_id=cond_attr['Target']['target_id']))
+                        # insert save tag key
+                        save_tag_key = dict(**key, save_tag=params['saveTag'])
+                        if not (self.SaveTag & save_tag_key):
+                            self.SaveTag.insert1(save_tag_key)
 
-
-            # populate trials from data files
-            success_state = (TaskState() & 'task_state_name="Success"').fetch1('task_state_id')
-
-            for data_path in data_file_paths:
-
-                # trial number
-                trial = int(re.search(r'beh_(\d*)',data_path).group(1))
-
-                # find matching parameters file
-                try:
-                    params_path = next(filter(lambda f: data_path.replace('data','params')==f, params_file_paths))
-                except StopIteration:
-                    print('Missing parameters file for trial {}'.format(trial))
-                else:
-                    # convert params to condition keys
-                    params = summary_class.read_trial_params(int(trial))
-
-                    if not 'gain' in params:
-                        params['gain'] = 1
-
-                    if not params:
-                        continue
-
-                    cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
-
-                    # read data
-                    # data = speedgoat.read_trial_data(data_path, success_state, fs)
-                    data = summary_class.read_trial_data(int(trial))
-                    if not data:
-                        continue
-                    if 'perturbation_offset' in data:
-                        data['perturbation_offset'] = np.nan_to_num(data['perturbation_offset'])
-
-                    if not 'force_filt_online' in data:
-                        filtered_force = (data['cursor_position'] - (1 - params['gain'])/2) \
-                                         * params['frcMax']/params['gain']
-                        data['force_filt_online'] = filtered_force
-                        if not np.isnan(data['force_x_raw']).any():
-                            data['force_raw_online'] = data['force_x_raw']
-                        else:
-                            data['force_raw_online'] = data['force_y_raw']
-                        data.pop('cursor_position')
-                    # aggregate condition part table parameters into a single dictionary
-                    all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
-
-                    # insert condition data
-                    cond_id = (cond_rel & all_cond_attr).fetch1('condition_id')
-                    cond_key = dict(**key, condition_id=cond_id)
-                    if not(self.Condition & cond_key):
-                        t, force = ConditionParams.target_force_profile(cond_id, fs)
-                        cond_key.update(condition_time=t, condition_force=force)
-                        self.Condition.insert1(cond_key, allow_direct_insert=True)
-
-                    # insert save tag key
-                    save_tag_key = dict(**key, save_tag=params['saveTag'])
-                    if not (self.SaveTag & save_tag_key):
-                        self.SaveTag.insert1(save_tag_key)
-
-                    # insert trial data
-                    trial_key = dict(**key, trial=trial, condition_id=cond_id, **data, save_tag=params['saveTag'])
-                self.Trial.insert1(trial_key)
+                        # insert trial data
+                        trial_key = dict(**key, trial=trial, condition_id=cond_id, **data, save_tag=params['saveTag'])
+                    self.Trial.insert1(trial_key, skip_duplicates=True)
+            else:
+                print(f"Missing files for {key['session_date']}. Skipping session.")
 
         else:
             print('Unrecognized task controller')
