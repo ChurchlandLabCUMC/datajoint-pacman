@@ -1,8 +1,8 @@
 import datajoint as dj
 import os, re, inspect
 import numpy as np
-from churchland_pipeline_python import lab, acquisition, equipment, reference, processing
-from churchland_pipeline_python.utilities import speedgoat, datajointutils
+from src.churchland_pipeline_python import lab, acquisition, equipment, reference, processing
+from src.churchland_pipeline_python.utilities import speedgoat, datajointutils
 from decimal import Decimal
 from functools import reduce
 from typing import Tuple, List
@@ -18,7 +18,7 @@ schema = dj.schema(dj.config.get('database.prefix') + 'churchland_analyses_pacma
 # LEVEL 0
 # =======
 
-@schema 
+@schema
 class ArmPosture(dj.Lookup):
     definition = """
     # Arm posture
@@ -28,7 +28,7 @@ class ArmPosture(dj.Lookup):
     elbow_flexion:    tinyint unsigned # elbow flexion angle (deg)
     shoulder_flexion: tinyint unsigned # shoulder flexion angle relative to coronal plane (deg)
     """
-    
+
     contents = [
         ['Cousteau', 0, 90, 65],
         ['Cousteau', 1, 90, 40],
@@ -39,7 +39,7 @@ class ArmPosture(dj.Lookup):
 @schema
 class ConditionParams(dj.Lookup):
     """
-    Task condition parameters. Each condition consists of a unique combination of force, 
+    Task condition parameters. Each condition consists of a unique combination of force,
     stimulation, and general target trajectory parameters. For conditions when stimulation
     was not delivered, stimulation parameters are left empty. Each condition also includes
     a set of parameters unique to the particular type of target trajectory.
@@ -59,7 +59,7 @@ class ConditionParams(dj.Lookup):
         force_offset:   decimal(5,4)      # baseline force (N)
         force_inverted: bool              # whether pushing on the load cell moves PacMan up (False) or down (True) onscreen
         """
-        
+
     class Stim(dj.Part):
         definition = """
         # CereStim parameters
@@ -87,7 +87,7 @@ class ConditionParams(dj.Lookup):
         target_pad_pre:  decimal(5,4)      # duration of "padding" dots preceding target force profile (s)
         target_pad_post: decimal(5,4)      # duration of "padding" dots following target force profile (s)
         """
-        
+
     class Static(dj.Part):
         definition = """
         # Static force profile parameters
@@ -151,7 +151,7 @@ class ConditionParams(dj.Lookup):
 
             return rel
 
-        
+
     class Sine(dj.Part):
         definition = """
         # Sinusoidal (single-frequency) force profile parameters
@@ -166,7 +166,7 @@ class ConditionParams(dj.Lookup):
 
             rel = (self * ConditionParams.Force) \
                 .proj(
-                    amp='CONVERT(ROUND(target_amplitude*force_max,{}), char)'.format(n_sigfigs), 
+                    amp='CONVERT(ROUND(target_amplitude*force_max,{}), char)'.format(n_sigfigs),
                     freq='CONVERT(ROUND(target_frequency,{}), char)'.format(n_sigfigs)
                 ) \
                 .proj(condition_label='CONCAT("Sine (", amp, " N, ", freq, " Hz)")')
@@ -181,7 +181,7 @@ class ConditionParams(dj.Lookup):
 
             rel = (self * ConditionParams.Target * ConditionParams.Force) \
                 .proj(
-                    amp='ROUND(target_amplitude*force_max, 4)', 
+                    amp='ROUND(target_amplitude*force_max, 4)',
                     freq='CONVERT(ROUND(target_frequency, 4), char)'
                 ) \
                 .proj(condition_rank=(
@@ -193,7 +193,7 @@ class ConditionParams(dj.Lookup):
 
             return rel
 
-        
+
     class Chirp(dj.Part):
         definition = """
         # Chirp force profile parameters
@@ -386,8 +386,8 @@ class ConditionParams(dj.Lookup):
 
 
     def get_common_attributes(
-        self, 
-        table: DataJointTable, 
+        self,
+        table: DataJointTable,
         include: List[str]=['label','rank'],
         n_sigfigs: int=4,
     ) -> List[dict]:
@@ -395,7 +395,7 @@ class ConditionParams(dj.Lookup):
 
         Args:
             table (DataJointTable): DataJoint table to use in the restriction
-            include (List[str], optional): Attributes to project into the condition table. 
+            include (List[str], optional): Attributes to project into the condition table.
                 Options: ['label','rank','time','force']. Defaults to ['label','rank'].
             n_sigfigs (int, optional): Number of significant figures include in label. Defaults to 4.
 
@@ -451,7 +451,7 @@ class ConditionParams(dj.Lookup):
 
         return condition_attributes
 
-        
+
     @classmethod
     def parse_params(self, params: dict, session_date: str=''):
         """
@@ -465,24 +465,24 @@ class ConditionParams(dj.Lookup):
             force_attr = dict(
                 force_max=params['frcMax'],
                 force_offset=params['frcOff'],
-                force_inverted=params['frcPol']==-1
+                force_inverted=(params['frcPol'] == -1 or params['gain'] == -1)
             )
         except KeyError:
             force_attr = dict(
                 force_max=params['frcMax'],
                 force_offset=0,
-                force_inverted=params['frcPol']==-1
+                force_inverted=(params['frcPol'] == -1 or params['gain'] == -1)
             )
 
         cond_rel = self.Force
 
         # stimulation attributes
         if params.get('stim')==1:
-                
+
             prog = re.compile('stim([A-Z]\w*)')
             stim_attr = {
                 'stim_' + prog.search(k).group(1).lower(): v
-                for k,v in zip(params.keys(), params.values()) 
+                for k,v in zip(params.keys(), params.values())
                 if prog.search(k) is not None and k != 'stimDelay'
                 }
 
@@ -504,7 +504,7 @@ class ConditionParams(dj.Lookup):
                 stim_attr.pop('stim_electrode')
 
             cond_rel = cond_rel * self.Stim
-            
+
         else:
             stim_attr = dict()
             cond_rel = cond_rel - self.Stim
@@ -549,8 +549,10 @@ class ConditionParams(dj.Lookup):
                 target_frequency_init = params['frequency'][0],
                 target_frequency_final = params['frequency'][1]
             )
-
+        else:
+            raise NotImplementedError(f"The {params['type']} has not been implemented.")
         cond_rel = cond_rel * self.Target * targ_type_rel
+
 
         # aggregate all parameter attributes into a dictionary
         cond_attr = dict(
@@ -561,7 +563,7 @@ class ConditionParams(dj.Lookup):
         )
 
         return cond_attr, cond_rel, targ_type_rel
-    
+
     @classmethod
     def target_force_profile(self, condition_id: int, fs: int):
 
@@ -646,7 +648,7 @@ class TaskState(dj.Lookup):
     ---
     task_state_name: varchar(255)     # task state name
     """
-    
+
 
 # =======
 # LEVEL 1
@@ -769,9 +771,10 @@ class Behavior(dj.Imported):
             fs = int((acquisition.BehaviorRecording & key).fetch1('behavior_recording_sample_rate'))
 
             # summary file path
-            if (acquisition.BehaviorRecording.File & key):
+            if (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'summary'}):
                 summary_file_path = (acquisition.BehaviorRecording.File & key & {'behavior_file_extension': 'summary'}) \
                     .proj_file_path().fetch1('behavior_file_path')
+
                 from scripts.utilities import find_char
 
                 # ensure local path
@@ -786,9 +789,7 @@ class Behavior(dj.Imported):
                 for sum_key in summary:
                     TaskState.insert1({'task_state_id': summary[sum_key],
                                        'task_state_name': sum_key}, skip_duplicates=True)
-                # pdb.set_trace()
-                # summary = speedgoat.read_task_states(summary_file_path)
-                #
+
                 # # update task states
                 # TaskState.insert(summary, skip_duplicates=True)
 
@@ -818,20 +819,23 @@ class Behavior(dj.Imported):
                         # read params file
                         params = summary_class.read_trial_params(int(trial))
 
+
                         if not params:
                             continue
 
                         # extract condition attributes from params file
-                        cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
+                        try:
+                            cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params,
+                                                                                              key['session_date'])
+                        except NotImplementedError:
+                            print(f'Ignoring trial {int(trial)} due to a type parsing error.')
+                            continue
 
                         # aggregate condition part table parameters into a single dictionary
-                        all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
+                        all_cond_attr = {k: round(v, 4) for d in list(cond_attr.values()) for k, v in d.items()}
 
                         # insert new condition if none exists
-                        all_cond_attr.pop('force_offset')
                         if not(cond_rel & all_cond_attr):
-
-                            # insert condition table
                             new_cond_id = datajointutils.next_unique_int(ConditionParams, 'condition_id')
                             cond_key = {'condition_id': new_cond_id}
 
@@ -859,12 +863,12 @@ class Behavior(dj.Imported):
                                 cond_part_rel.insert1(dict(**cond_key, **cond_part_attr))
 
                             # insert target type table
-                            targ_type_rel.insert1(dict(**cond_key, **cond_attr['TargetType'], target_id=cond_attr['Target']['target_id']))
+                            targ_type_rel.insert1(dict(**cond_key, **cond_attr['TargetType'],
+                                                       target_id=cond_attr['Target']['target_id']))
+
 
 
                 # populate trials from data files
-                success_state = (TaskState() & 'task_state_name="Success"').fetch1('task_state_id')
-
                 for data_path in data_file_paths:
 
                     # trial number
@@ -872,9 +876,10 @@ class Behavior(dj.Imported):
 
                     # find matching parameters file
                     try:
-                        params_path = next(filter(lambda f: data_path.replace('data','params')==f, params_file_paths))
+                        _ = next(filter(lambda f: data_path.replace('data','params')==f, params_file_paths))
                     except StopIteration:
                         print('Missing parameters file for trial {}'.format(trial))
+                        continue
                     else:
                         # convert params to condition keys
                         params = summary_class.read_trial_params(int(trial))
@@ -884,11 +889,13 @@ class Behavior(dj.Imported):
 
                         if not 'gain' in params:
                             params['gain'] = 1
-
-                        cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
+                        try:
+                            cond_attr, cond_rel, targ_type_rel = ConditionParams.parse_params(params, key['session_date'])
+                        except NotImplementedError:
+                            print(f'Ignoring trial {int(trial)} due to a type parsing error.')
+                            continue
 
                         # read data
-                        # data = speedgoat.read_trial_data(data_path, success_state, fs)
                         data = summary_class.read_trial_data(int(trial))
                         if not data:
                             continue
@@ -905,10 +912,11 @@ class Behavior(dj.Imported):
                                 data['force_raw_online'] = data['force_y_raw']
                             data.pop('cursor_position')
                         # aggregate condition part table parameters into a single dictionary
-                        all_cond_attr = {k: v for d in list(cond_attr.values()) for k, v in d.items()}
+                        all_cond_attr = {k: round(v, 4) for d in list(cond_attr.values()) for k, v in d.items()}
 
                         # insert condition data
                         cond_id = (cond_rel & all_cond_attr).fetch1('condition_id')
+
                         cond_key = dict(**key, condition_id=cond_id)
                         if not(self.Condition & cond_key):
                             t, force = ConditionParams.target_force_profile(cond_id, fs)
@@ -922,7 +930,7 @@ class Behavior(dj.Imported):
 
                         # insert trial data
                         trial_key = dict(**key, trial=trial, condition_id=cond_id, **data, save_tag=params['saveTag'])
-                    self.Trial.insert1(trial_key, skip_duplicates=True)
+                        self.Trial.insert1(trial_key, skip_duplicates=True)
             else:
                 print(f"Missing files for {key['session_date']}. Skipping session.")
 
