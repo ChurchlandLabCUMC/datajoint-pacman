@@ -2,9 +2,10 @@
 
 import datajoint as dj
 import os, re, inspect, time, shutil
+import glob
+import src.neo as neo
 import pandas as pd
 import numpy as np
-import neo
 import progressbar
 from src.churchland_pipeline_python import acquisition, action, equipment, lab, processing, reference
 from src.churchland_pipeline_python.utilities import datajointutils
@@ -12,19 +13,23 @@ from src.pacman_pipeline_python import pacman_acquisition, pacman_processing, pa
 from . import datasynthesis
 from datetime import datetime
 from typing import List, Tuple
+
 import pdb
 
+from packaging import version
+
+HAS_NEO_10_2 = version.parse(neo.__version__) >= version.parse('0.10.2')
 # =======
 # SESSION
 # =======
 
 def session(
         users: List[str],
-        monkey: str='Cousteau',
-        task_version: str='1.0',
-        dates: List[str]=None,
-        hardware: Tuple[str]=('Speedgoat', 'Cerebus', '5lb Load Cell'),
-        software: Tuple[str]=('Simulink', 'Psychtoolbox')
+        monkey: str = 'Cousteau',
+        task_version: str = '1.0',
+        dates: List[str] = None,
+        hardware: Tuple[str] = ('Speedgoat', 'Cerebus', '5lb Load Cell'),
+        software: Tuple[str] = ('Simulink', 'Psychtoolbox')
     ) -> None:
 
         # input keys
@@ -35,11 +40,9 @@ def session(
 
         # get session dates and raw path
         session_dates, raw_path = datasynthesis.get_sessions(monkey)
-        
         # restrict dates based on user input
         if dates:
             session_dates = [d for d in session_dates if d in dates]            
-
         # remove sessions with inputs
         session_dates = [date for date in session_dates if not acquisition.Session & {'session_date': date}]
 
@@ -66,10 +69,10 @@ def session(
             try:
                 if 'Cerebus' in hardware:
                     ephys_dir = 'blackrock'
-
                 elif 'IMEC' in hardware:
                     ephys_dir = 'imec'
-
+                elif 'Neuropixels' in hardware:
+                    ephys_dir = 'neuropixels'
                 next(filter(lambda x: x==ephys_dir, session_files))
 
             except StopIteration:
@@ -100,7 +103,6 @@ def session(
                 else:
                     with open(session_path + notes_files,'r') as f:
                         acquisition.Session.Notes.insert1(dict(**session_key, session_notes_id=0, session_notes=f.read()))
-
                 # insert hardware
                 for hardware_name in hardware:
                     acquisition.Session.Hardware.insert1(dict(
@@ -191,35 +193,38 @@ def ephysrecording(display_progress: bool=True):
         if (acquisition.Session.Hardware & session_key & {'hardware': 'Cerebus'}):
 
             ephys_path = os.path.sep.join([raw_path[:-1], str(session_key['session_date']), 'blackrock', ''])
+        elif (acquisition.Session.Hardware & session_key & {'hardware': 'Neuropixels'}):
+
+            ephys_path = os.path.sep.join([raw_path[:-1], str(session_key['session_date']), 'neuropixels', ''])
+
+        else:
+            # pdb.set_trace()
+            raise NotImplementedError('Hardware type not implemented for ephys recordings.')
 
         return ephys_path
 
     # remove problematic sessions and those with ephys recording entries
     key_source = acquisition.Session - 'session_problem' - acquisition.EphysRecording
-
     # remove sessions without valid behavior paths
     key_source = key_source - [key for key in key_source.fetch('KEY') if not os.path.isdir(getephyspath(key))]
 
     if display_progress:
         bar = progressbar.ProgressBar(max_value=len(key_source))
         bar.update(0)
-
     for key_idx, session_key in enumerate(key_source.fetch('KEY')):
 
-        # ephys file regular expression
-        ephys_file_regexp = '_'.join([
-            'pacman-task',
-            session_key['monkey'][0].lower(),
-            str(session_key['session_date']).replace('-','')[2:],
-            '(emg|neu|neu_emg)',
-            '\d{3}\.ns\d'
-            ])
-
         if (acquisition.Session.Hardware & session_key & {'hardware': 'Cerebus'}):
-
+            # ephys file regular expression
+            ephys_file_regexp = '_'.join([
+                'pacman-task',
+                session_key['monkey'][0].lower(),
+                str(session_key['session_date']).replace('-', '')[2:],
+                '(emg|neu|neu_emg)',
+                '\d{3}\.ns\d'
+            ])
             # get blackrock files
             ephys_path = getephyspath(session_key)
-            blackrock_files = list(os.listdir(ephys_path))
+            neuropixels_files = list(os.listdir(ephys_path))
 
             # recording key
             ephys_recording_key = dict(**session_key,
@@ -227,7 +232,7 @@ def ephysrecording(display_progress: bool=True):
                 ephys_recording_duration=0)
 
             # NSx files
-            nsx_files = [f for f in blackrock_files if re.search(ephys_file_regexp,f)]
+            nsx_files = [f for f in neuropixels_files if re.search(ephys_file_regexp, f)]
 
             # ephys file and channel keys
             ephys_file_keys = []
@@ -306,6 +311,115 @@ def ephysrecording(display_progress: bool=True):
 
             if display_progress:
                 bar.update(1+key_idx)
+        elif (acquisition.Session.Hardware & session_key & {'hardware': 'Neuropixels'}):
+            # ephys file regular expression
+            date_long = str(session_key['session_date']).replace('-', '')
+            date_short = str(session_key['session_date']).replace('-', '')[2:]
+            # print(date_long, date_short)
+            ephys_file_regexp = '_'.join([
+                'pacman-task',
+                session_key['monkey'][0].lower(),f'{date_long}|{date_short}',
+                '(emg|neu|neu_emg)','(g\d|_g\d)'
+            ])
+
+            # get neuropixels files
+            ephys_path = getephyspath(session_key)
+            neuropixels_files = list(os.listdir(ephys_path))
+
+            # recording key
+            ephys_recording_key = dict(**session_key,
+                                       ephys_recording_path=reference.EngramTier.ensure_remote(ephys_path),
+                                       ephys_recording_duration=0)
+
+            # NSx files
+            nsx_folders = [f for f in neuropixels_files if re.search(ephys_file_regexp, f)]
+
+
+        # ephys file and channel keys
+
+            for i_foldr, folder_name in enumerate(nsx_folders):
+                full_path = os.path.join(ephys_path, folder_name)
+                all_folders = glob.glob(full_path + '/*/')
+                all_folders = [folder for folder in all_folders if re.search('pacman', folder.split('/')[-2])]
+
+                restrictions = ['/*.ap.bin']
+                ephys_file_keys = []
+                ephys_channel_keys = []
+                count = 0
+                for sub_folder in all_folders:
+                    imec_num = re.search('(imec)([0-9]+)', sub_folder)
+                    stream_ids = [imec_num.group(0) + '.ap']
+                    for stream_id, name_restrictor in zip(stream_ids, restrictions):
+                        # reader = se.read_spikeglx(folder_path=sub_folder, stream_id=stream_id, load_sync_channel=True)
+                        reader = neo.rawio.SpikeGLXRawIO(dirname=sub_folder[:-1], load_sync_channel=True)
+                        reader.parse_header()
+                        stream_channels = reader.header['signal_streams']
+                        stream_ids = stream_channels['id']
+                        if stream_ids.size > 1:
+                            stream_id = [i for i in stream_ids if re.search('imec\d.ap', i)][0]
+                            stream_index = list(stream_ids).index(stream_id)
+                        else:
+                            stream_index = 0
+                        file_path = glob.glob(sub_folder + name_restrictor)[0]
+                        file_name = file_path.split('/')[-1]
+                        file_parts = file_name.split('.')
+                        file_path_store = '/'.join(sub_folder.split('/')[-3:])
+                        ephys_file_keys.append(dict(
+                            **session_key,
+                            ephys_file_id=count,
+                            ephys_file_path=file_path_store, #file_path
+                            ephys_file_name=file_parts[0],
+                            ephys_file_extension='.'.join(file_parts[1:])
+                        ))
+                        fs = int(reader.get_signal_sampling_rate(stream_index=stream_index))
+                        ephys_recording_key.update(ephys_recording_sample_rate=fs)
+                        ephys_recording_key['ephys_recording_duration'] += int(reader.get_signal_size(
+                            0, 0, stream_index=stream_index) / fs)
+                        channels = reader.header['signal_channels']
+                        chan_attr = []
+                        for chan_index, channel in enumerate(channels):
+                            # chan_index = reader.id_to_index(channel)
+                            chan_id = re.search('(.ap#AP)([0-9]+)', channel[1])
+                            if re.search(".ap#AP", channel[1]):
+                                chan_type = 'brain'
+                            elif re.search("(.ap#SY)([0-9]+)", channel[1]):
+                                chan_type = 'sync'
+                                chan_id = re.search('(.ap#SY)([0-9]+)', channel[1])
+                            elif re.search(".lf#LF", channel[1]):
+                                chan_type = 'brain'
+                                continue
+                            elif re.search(".lf#SY", channel[1]):
+                                chan_type = 'sync'
+                                continue
+                            else:
+                                raise NotImplementedError(f'Unrecognized channel type {channel}.')
+
+                            chan_attr.append(dict(
+                                **session_key,
+                                ephys_file_id=count,
+                                ephys_channel_idx=chan_index,
+                                ephys_channel_id=chan_id.group(2),
+                                ephys_channel_type=chan_type
+                            ))
+                        count += 1
+                        ephys_channel_keys.extend(chan_attr)
+                # insert ephys recording
+
+
+                # insert ephys recording files
+                acquisition.EphysRecording.insert1(ephys_recording_key)
+
+                # if isinstance(ephys_file_keys, list):
+                #     ephys_file_keys = ephys_file_keys[0]
+                acquisition.EphysRecording.File.insert(ephys_file_keys)
+                # insert ephys recording channels
+                try:
+                    acquisition.EphysRecording.Channel.insert(ephys_channel_keys)
+                except:
+                    pdb.set_trace()
+
+                if display_progress:
+                    bar.update(1+key_idx)
 
 
 # =================
@@ -379,7 +493,6 @@ def brainchannelgroup(display_progress: bool=True):
     key_source = (acquisition.EphysRecording.File \
         & (acquisition.EphysRecording.Channel & {'ephys_channel_type': 'brain'})) \
         - acquisition.BrainChannelGroup
-
     if display_progress:
         bar = progressbar.ProgressBar(max_value=len(key_source))
         bar.update(0)
@@ -395,9 +508,9 @@ def brainchannelgroup(display_progress: bool=True):
             config_rel = equipment.ElectrodeArrayConfig & brain_attr[0]
             if config_rel and config_rel.attributes_in_restriction():
                 [attr.update(**config_rel.fetch1('KEY')) for attr in brain_attr]
-
             # insert brain channel group
             acquisition.BrainChannelGroup.insert(brain_attr)
+
 
             # get channel group primary keys
             brain_channel_group_keys = (acquisition.BrainChannelGroup \
@@ -503,9 +616,11 @@ def brainsort(monkey: str='Cousteau', spike_sorter: Tuple[str]=('Kilosort','2.0'
     if software_key['software'] == 'Kilosort':
 
         # remote path to kilosort files
-        kilosort_path = [(key, processed_path + os.path.sep.join([str(key['session_date']), 'kilosort-manually-sorted', '']))
+        manual_sort_path = [(key, processed_path + os.path.sep.join([str(key['session_date']), 'kilosort-manually-sorted', '']))
             for key in key_source]
-
+        auto_sort_path = [(key, processed_path + os.path.sep.join([str(key['session_date']), 'kilosort-output', '']))
+                         for key in key_source]
+        kilosort_path = manual_sort_path + auto_sort_path
         # remove non-existent paths
         kilosort_path = [(key, pth) for key, pth in kilosort_path if os.path.isdir(pth)]
 
@@ -522,13 +637,25 @@ def brainsort(monkey: str='Cousteau', spike_sorter: Tuple[str]=('Kilosort','2.0'
         '\d{3}'
         ])
 
+    brain_sort_file_regexp_2 = '_'.join([
+        'pacman-task',
+        monkey[0].lower(),
+        '\d{6}',
+        '(neu|neu_emg)',
+        '(g[0-9]+)'
+    ])
+
     # full sort paths
     sort_path = []
     for key, pth in kilosort_path:
         sort_dir = [d for d in os.listdir(pth) if re.search(brain_sort_file_regexp, d)]
         sort_path.extend([(key, pth + os.path.sep.join([d, ''])) for d in sort_dir])
-
-    # ensure remote path
+    for key, pth in kilosort_path:
+        sort_dir = [d for d in os.listdir(pth) if re.search(brain_sort_file_regexp_2, d)]
+        sort_path.extend([(key, pth + os.path.sep.join([d, '']) + os.path.sep.join(
+            [d + f"_imec{ key['ephys_file_id']}", '']))
+                          for d in sort_dir])
+# ensure remote path
     sort_path = [(pth[0], reference.EngramTier.ensure_remote(pth[1])) for pth in sort_path]
 
     # remove paths already in table
@@ -537,7 +664,6 @@ def brainsort(monkey: str='Cousteau', spike_sorter: Tuple[str]=('Kilosort','2.0'
     if display_progress:
         bar = progressbar.ProgressBar(max_value=len(sort_path))
         bar.update(0)
-
     for key_idx, (brain_sort_key, brain_sort_path) in enumerate(sort_path):
 
         # update key with spike sorter and sort path attributes

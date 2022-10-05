@@ -1,16 +1,16 @@
 import itertools, re
 import pdb
+from tqdm import tqdm
 
 import datajoint as dj
 import numpy as np
 import pandas as pd
 import xarray
 import xarray as xr
-from src.churchland_pipeline_python import acquisition
 from sklearn import decomposition
 from typing import List
-from .. import pacman_acquisition
 
+#TODO add abitlity to load multiple data names at once
 
 class NeuroDataArrayConstructor:
 
@@ -47,6 +47,7 @@ class NeuroDataArrayConstructor:
             'n_samples_per_condition': [X.shape[1] for X in self.data[0]],
             'multi_trial': any([Y.ndim == 3 for X in self.data for Y in X])
         }
+
         assert all(len(X)==self._data_stats['n_conditions'] for X in self.data), \
             'Mismatched number of conditions across sessions'
         for session_data in self.data:
@@ -54,7 +55,7 @@ class NeuroDataArrayConstructor:
                 'Mismatched condition durations across session'
         for X, unit_count in zip(self.data, self._data_stats['n_units_per_session']):
             assert all(xi.shape[0]==unit_count for xi in X), \
-                'Mismatched number of units across conditions'
+                    'Mismatched number of units across conditions'
 
     def _read_unit_ids(self):
         if self.unit_ids is None:
@@ -196,18 +197,22 @@ class NeuroDataArrayConstructor:
         data_name: str,
         unit_names: List[str]=None,
         new_sample_rate: int=None,
+        session_keys: List[dict]=None,
+        condition_keys: List[dict]=None,
         ):
+        from .. import pacman_acquisition, pacman_brain
         # unit ID names
         unit_id_names = unit_names if unit_names is not None else []
-
-        session_keys = (dj.U('session_date') & table).fetch('KEY')
+        if session_keys is None:
+            session_keys = (dj.U('session_date') & table.proj('session_date')).fetch('KEY')
+        # session_keys = table.fetch('session_date')
         if len(session_keys) > 1 or unit_names is None:
             unit_id_names.insert(0, 'session_date')
 
         # condition IDs
-        condition_keys = (pacman_acquisition.ConditionParams & table).fetch('KEY')
+        if condition_keys is None:
+            condition_keys = (pacman_acquisition.ConditionParams & table).fetch('KEY')
         condition_ids = [key['condition_id'] for key in condition_keys]
-
         # fetch condition times
         try:
             sample_rates = list(np.unique(table.fetch('sample_rate')))
@@ -230,23 +235,22 @@ class NeuroDataArrayConstructor:
                 condition_times.update({(cid, fs): t})
 
             new_condition_times = [condition_times[(cid, new_sample_rate)] for cid in condition_ids]
-
         # check multi trial
         is_multi_trial = 'trial' in table.primary_key
-
         session_data = []
         unit_ids = []
-        for session_key in session_keys:
+        reduced_table = table.proj(*unit_id_names)
 
-            unit_keys = (dj.U(*unit_id_names) & table & session_key).fetch(as_dict=True, order_by=unit_id_names)
-            unit_ids.append([[(name, key[name]) for name in unit_id_names] for key in unit_keys])
-
+        for idx, session_key in tqdm(enumerate(session_keys)):
             condition_data = []
-            for condition_key in condition_keys:
-                condition_table = table & session_key & condition_key
+            unit_keys = (dj.U(*unit_id_names) & (reduced_table & session_key)).fetch(as_dict=True, order_by=unit_id_names)
+            unit_ids.append([[(name, key[name]) for name in unit_id_names] for key in unit_keys])
+            for condition_key in tqdm(condition_keys):
                 if is_multi_trial:
+                    condition_table = table.proj(*['trial', 'sample_rate', data_name]) & session_key & condition_key
                     if fetch_times:
-                        trial, sample_rates, X = condition_table.fetch('trial', 'sample_rate', data_name, order_by=unit_id_names)
+                        trial, sample_rates, X = condition_table.fetch('trial', 'sample_rate', data_name,
+                                                                       order_by=unit_id_names)
                         for idx, fs in enumerate(sample_rates):
                             if fs != new_sample_rate:
                                 t_old = condition_times[(condition_key['condition_id'], fs)]
@@ -259,6 +263,8 @@ class NeuroDataArrayConstructor:
                     condition_data.append(np.stack(X, axis=2))
                 else:
                     if fetch_times:
+                        condition_table = table.proj(*['sample_rate', data_name]) & session_key & condition_key
+
                         sample_rates, X = condition_table.fetch('sample_rate', data_name, order_by=unit_id_names)
                         for idx, fs in enumerate(sample_rates):
                             if fs != new_sample_rate:
@@ -266,9 +272,9 @@ class NeuroDataArrayConstructor:
                                 t_new = condition_times[(condition_key['condition_id'], new_sample_rate)]
                                 X[idx] = np.interp(t_old, t_new, X[idx])
                     else:
+                        condition_table = table.proj(data_name) & session_key & condition_key
                         X = condition_table.fetch(data_name, order_by=unit_id_names)
                     condition_data.append(np.vstack(X))
-
             session_data.append(condition_data)
 
         return cls(session_data, unit_ids, condition_ids, new_condition_times, data_name, new_sample_rate)
@@ -369,8 +375,16 @@ class NeuroDataArray(NeuroDataArrayConstructor):
         sorted_ct_indexes = np.vstack([ct_indexes[ct_indexes[:,0]==cid,:] for cid in sorted_condition_ids])
         sorted_ct_indexes = [ct for ct in sorted_ct_indexes.T]
         sorted_ct_indexes[0] = sorted_ct_indexes[0].astype(int)
-        new_ct_indexes = pd.MultiIndex.from_arrays(sorted_ct_indexes, names=['condition_id', 'time'])
+        new_ct_indexes = pd.MultiIndex.from_arrays(sorted_ct_indexes, names=['condition_id',  'time'])
         self.data_set = self.data_set.reindex(condition_time=new_ct_indexes)
+
+    def  rename_condition(self):
+        ct_indexes = np.vstack([np.array(ct) for ct in self.data_set.indexes['condition_time']])
+        ct_index = [None] * 2
+        ct_index[0], ct_index[1] = ct_indexes[:, 0], ct_indexes[:, 1]
+        new_ct_indexes = pd.MultiIndex.from_arrays(ct_index, names=['condition_id',  'time'])
+        self.data_set = self.data_set.reindex(condition_time=new_ct_indexes)
+
 
     def trial_average(self, n_folds: int=1):
         assert 'trial' in self.data_set.coords, 'Only applicable for multi-trial data'

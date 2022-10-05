@@ -3,8 +3,9 @@ import os, inspect, itertools
 import pandas as pd
 import numpy as np
 import scipy
-import neo
+import src.neo as neo
 import matplotlib.pyplot as plt
+from scipy.stats import special_ortho_group
 from src.churchland_pipeline_python import lab, acquisition, processing, reference
 from src.churchland_pipeline_python.utilities import datajointutils
 from . import pacman_acquisition, pacman_processing
@@ -184,6 +185,15 @@ class MotorUnitSpikeRaster(dj.Computed):
         return keys, np.array(spikes)
 
 
+@schema
+class MotorIndex(dj.Manual):
+    definition = """
+    unit_id = 0 : smallint unsigned
+    monkey : varchar(155)
+    ---
+    session_date : date
+    motor_unit_id : smallint unsigned
+    """
 # =======
 # LEVEL 1
 # =======
@@ -624,3 +634,179 @@ class MotorUnitPsth(dj.Computed):
             psths = psth_data
 
         return psths, condition_ids, condition_times, condition_keys, motor_chan_keys
+
+
+@schema
+class MotorUnitPsthShuffled(dj.Computed):
+    definition = """
+        # Peri-stimulus time histogram generated from even trials
+        -> processing.MotorUnit
+        -> pacman_processing.AlignmentParams
+        -> pacman_processing.BehaviorBlock
+        -> pacman_processing.BehaviorQualityParams
+        -> pacman_processing.FilterParams
+        -> pacman_processing.ShuffleIds
+        ---
+        motor_unit_psth_group1:     longblob # neuron trial-averaged firing rate (spikes/s)
+        motor_unit_psth_group2:     longblob # neuron trial-averaged firing rate (spikes/s)
+        """
+    key_source = processing.MotorUnit \
+                 * pacman_processing.AlignmentParams \
+                 * pacman_processing.BehaviorBlock \
+                 * pacman_processing.BehaviorQualityParams \
+                 * pacman_processing.FilterParams \
+                 * pacman_processing.ShuffleIds \
+                 & MotorUnitRate \
+                 & (pacman_processing.GoodTrial & 'good_trial')
+
+    def make(self, key):
+        rates = (MotorUnitRate & key & (pacman_processing.GoodTrial & 'good_trial')).fetch('motor_unit_rate')
+        rates = np.stack(rates)
+        n_trials = rates.shape[0]
+        indices = np.random.permutation(np.arange(n_trials))
+        g1_idx = indices[:round(n_trials/2)]
+        g2_idx = indices[round(n_trials/2):]
+        rates1 = rates[g1_idx]
+        rates2 = rates[g2_idx]
+
+        key.update(
+            motor_unit_psth_group1=rates1.mean(axis=0),
+            motor_unit_psth_group2=rates2.mean(axis=0),
+        )
+
+        self.insert1(key, skip_duplicates='True')
+
+
+
+# =======
+# LEVEL 3
+# =======
+# @schema
+# class MotorUnitLatents(dj.Manual):
+#     definition = """
+#     latent_dimensionality = 10 : smallint unsigned
+#     null_method = 'poisson' : varchar(100)
+#     """
+#
+# @schema
+# class MotorProjectionWeights(dj.Computed):
+#     definition = """
+#     -> pacman_processing.ShuffleIds
+#     -> MotorUnitLatents
+#     ---
+#     projection_weights : longblob
+#     """
+#
+#     key_source = pacman_processing.ShuffleIds * MotorUnitLatents
+#
+#     def make(self, key):
+#         dimensionality = (MotorUnitLatents & key).fetch1('latent_dimensionality')
+#         n_vars = (MotorIndex).fetch('unit_id').max() + 1
+#         assert n_vars >= dimensionality, 'The Dimensionality must be less than or equal to the number of variables.'
+#         projection_matrix = special_ortho_group(dim=n_vars).rvs()[:dimensionality]
+#         key.update({'projection_weights': projection_matrix})
+#         self.insert1(key)
+#
+#
+# @schema
+# class NullModelAverageRates(dj.Computed):
+#     definition = """
+#     # single unit average firing rates to be used
+#     -> MotorProjectionWeights
+#     -> MotorIndex
+#     -> MotorUnitPsth
+#     condition_id: smallint unsigned
+#     ---
+#     average_firing_rate: longblob
+#     """
+#
+#
+#     key_source = MotorProjectionWeights * MotorIndex.proj('session_date', 'motor_unit_id')
+#
+#
+#     def make(self, key):
+#         condition_list = (pacman_acquisition.Behavior.Condition & {'session_date': '2019-01-30'}).fetch('condition_id')
+#         matrix_indx, projection_matrix = (MotorProjectionWeights * MotorIndex & key).fetch1(
+#             'unit_id', 'projection_weights')
+#         conditions = pacman_acquisition.ConditionParams & (
+#                 pacman_acquisition.Behavior.Condition & 'session_date="2019-01-30"')
+#         condition_count = dj.U(*acquisition.Session.primary_key).aggr(
+#             pacman_acquisition.Behavior.Condition & conditions, count='count(*)')
+#         mu_sessions = acquisition.Session & (condition_count & 'count=12').proj()
+#         psth_table = MotorUnitPsth & conditions & mu_sessions * \
+#                      acquisition.BehaviorRecording.proj(sample_rate='behavior_recording_sample_rate')
+#         motor_psths = NeuroDataArray.from_datajoint_table(psth_table, 'motor_unit_psth',
+#                                                           unit_names=['motor_unit_id']).data_set
+#         for condition_id in condition_list:
+#             psths = motor_psths['motor_unit_psth'].sel(condition=condition_id).values
+#             true_means = psths.mean(axis=1)
+#             reconstruction = (projection_matrix.T @ projection_matrix @ (psths - true_means[:, np.newaxis])
+#                               )[matrix_indx]
+#             mean_shifted = reconstruction + true_means[matrix_indx]
+#             key.update({'average_firing_rate': np.clip(mean_shifted, 0, 1000) / 1000, 'condition_id': condition_id})
+#             self.insert1(key, skip_duplicates=True)
+#
+#
+# @schema
+# class NullModelSpikeRaster(dj.Computed):
+#     definition = """
+#     -> NullModelAverageRates
+#     -> MotorUnitSpikeRaster
+#     trial: smallint unsigned
+#     ---
+#     motor_unit_rate: longblob #
+#     fano_factor: double
+#     """
+#     key_source = NullModelAverageRates
+#     def make(self, key):
+#         rates, trials = (MotorUnitSpikeRaster * MotorIndex & key & (
+#                 pacman_processing.GoodTrial & 'good_trial')).fetch('motor_unit_spike_raster', 'trial')
+#         average_fr, motor_unit_id, session_date = (NullModelAverageRates * MotorIndex & key
+#                                                    ).fetch1('average_firing_rate', 'motor_unit_id', 'session_date')
+#         rates = np.stack(rates)
+#         rates = np.add.reduceat(rates, np.arange(0, rates.shape[1], 30), axis=1)
+#         ntrials, ntime = rates.shape
+#         mean_firing_rate = rates.mean(axis=0)[:, np.newaxis]
+#         variance = rates.var(axis=0)[:, np.newaxis]
+#         if key['null_method'] == 'generalized_count':
+#             spiking_model = GeneralizedCount(name='spiking_model')
+#             fano_factor = (np.linalg.inv(mean_firing_rate.T @ mean_firing_rate) @ mean_firing_rate.T @ variance)[0, 0]
+#             mean_frs = np.tile(average_fr[np.newaxis, :ntime] + 1e-16, [ntrials, 1])
+#             delta = 1 - np.sqrt(1 / fano_factor)
+#             deltas = np.tile(delta, [ntrials, ntime])
+#             new_means = mean_frs * (1 -deltas)
+#             start_batch = time.time()
+#             # spikes = spiking_model.rvs(new_means, deltas)
+#             spikes = spiking_model.rvs(np.ones(new_means.shape), np.zeros(new_means.shape))
+#             end_time_batch = time.time()
+#             elapsed_batch = end_time_batch - start_batch
+#             print(elapsed_batch)
+#         elif key['null_method'] == 'poisson':
+#             try:
+#                 fano_factor = (np.linalg.inv(mean_firing_rate.T @ mean_firing_rate) @
+#                                mean_firing_rate.T @ variance)[0, 0]
+#             except:
+#                 fano_factor = (np.linalg.pinv(mean_firing_rate.T @ mean_firing_rate) @
+#                                mean_firing_rate.T @ variance)[0, 0]
+#             mean_frs = np.tile(average_fr[np.newaxis, :ntime] + 1e-16, [ntrials, 1])
+#             # start_batch = time.time()
+#             spikes = poisson.rvs(mean_frs)
+#             # end_time_batch = time.time()
+#             # elapsed_batch = end_time_batch - start_batch
+#             # print(elapsed_batch)
+#         for idx, trial in enumerate(trials):
+#             key.update({'trial': trial, 'fano_factor': fano_factor,
+#                         'motor_unit_rate': spikes[idx], 'session_date': session_date,
+#                         'motor_unit_id': motor_unit_id})
+#             monkey, ephys_file_id, muscle_abbr, emg_channel_group_id, \
+#             emg_sort_id, alignment_params_id = (MotorUnitSpikeRaster & key).fetch1('monkey', 'ephys_file_id',
+#                                                                                    'muscle_abbr',
+#                                                                                    'emg_channel_group_id',
+#                                                                                    'emg_sort_id',
+#                                                                                    'alignment_params_id')
+#             key.update({'monkey': monkey, 'ephys_file_id': ephys_file_id, 'muscle_abbr': muscle_abbr,
+#                         'emg_channel_group_id': emg_channel_group_id, 'emg_sort_id': emg_sort_id,
+#                         'alignment_params_id': alignment_params_id})
+#             self.insert1(key, skip_duplicates=True)
+
+from scipy.ndimage import gaussian_filter1d

@@ -1,4 +1,6 @@
 import os, re, glob
+import pdb
+
 import datajoint as dj
 from os.path import dirname, basename, isfile, join
 from dotenv import dotenv_values, find_dotenv
@@ -6,7 +8,7 @@ from dotenv import dotenv_values, find_dotenv
 dj_env = {
     'DJ_HOST': 'database.host',
     'DJ_USER': 'database.user',
-    'DJ_PASS': 'database.password'
+    'DJ_PASS': 'database.password',
 }
 
 try:
@@ -23,7 +25,6 @@ if 'MODE' in env_values.keys() and not running_production:
     dj.config['database.prefix'] = env_values['MODE'] + '_'
 else:
     dj.config['database.prefix'] = ''
-
 # update list of all modules
 modules = glob.glob(join(dirname(__file__), "*.py"))
 __all__ = [basename(f)[:-3] for f in modules \

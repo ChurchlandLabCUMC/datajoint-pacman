@@ -1,3 +1,5 @@
+import pdb
+
 import datajoint as dj
 import os, inspect, itertools
 import pandas as pd
@@ -42,7 +44,6 @@ class Force(dj.Computed):
         # convert raw force signal to Newtons
         trial_rel = pacman_acquisition.Behavior.Trial & trial_source
         force_data = trial_rel.process_force(data_type='raw', apply_filter=False, keep_keys=True)
-
         # get filter kernel
         filter_key = (processing.Filter & (pacman_processing.FilterParams & key)).fetch1('KEY')
         filter_parts = datajointutils.get_parts(processing.Filter, context=inspect.currentframe())
@@ -50,7 +51,7 @@ class Force(dj.Computed):
 
         # filter raw data
         fs = (acquisition.BehaviorRecording & key).fetch1('behavior_recording_sample_rate')
-        [frc.update(force_filt_offline=filter_rel().filt(frc['force_raw_online'], fs)) for frc in force_data];
+        [frc.update(force_filt_offline=filter_rel().filt(frc['force_raw_online'], fs)) for frc in force_data]
 
         # fetch alignment indices and cast as integers
         behavior_alignment = (trial_source).fetch('behavior_alignment', order_by='trial')

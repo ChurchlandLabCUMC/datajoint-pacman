@@ -1,0 +1,10 @@
+session_date,monkey,behavior_block_id,arm_posture_id,save_tag
+2021-10-07,Igor,0,0,
+2021-10-20,Igor,0,0,
+2021-10-25,Igor,0,0,
+2022-05-17,Igor,0,0,0
+2022-05-18,Igor,0,0,"1, 3"
+2022-05-19,Igor,0,0,3
+2022-05-20,Igor,0,0,1:4
+2022-05-25,Igor,0,0,1:2
+2022-05-26,Igor,0,0,1

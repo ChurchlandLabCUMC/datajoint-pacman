@@ -32,7 +32,8 @@ class ArmPosture(dj.Lookup):
     contents = [
         ['Cousteau', 0, 90, 65],
         ['Cousteau', 1, 90, 40],
-        ['Cousteau', 2, 90, 75]
+        ['Cousteau', 2, 90, 75],
+        ['Igor', 0, 90, 65],
     ]
 
 
@@ -701,30 +702,32 @@ class Behavior(dj.Imported):
         force_z_raw = null: longblob # z component of force when using multiaxis load cell
         """
 
-        def process_force(self, data_type='raw', apply_filter=True, keep_keys=False):
+        def process_force(self, data_type='filt', apply_filter=True, keep_keys=False):
 
             # aggregate load cell parameters per session
-            load_cell_params = (acquisition.Session.Hardware & {'hardware': '5lb Load Cell'}) * equipment.Hardware.Parameter & self
-
-            force_capacity_per_session = dj.U(*acquisition.Session.primary_key) \
-                .aggr((load_cell_params & {'equipment_parameter': 'force capacity'}), force_capacity='equipment_parameter_value')
-
-            voltage_output_per_session = dj.U(*acquisition.Session.primary_key) \
-                .aggr((load_cell_params & {'equipment_parameter': 'voltage output'}), voltage_output='equipment_parameter_value')
-
-            load_cell_params_per_session = force_capacity_per_session * voltage_output_per_session
+            # load_cell_params = (acquisition.Session.Hardware & {'hardware': '5lb Load Cell'}) * equipment.Hardware.Parameter & self
+            # if len(load_cell_params) ==0:
+            #     load_cell_params = (acquisition.Session.Hardware & {'hardware': 'Multiaxis Load Cell'}) * equipment.Hardware.Parameter & self
+            #
+            # force_capacity_per_session = dj.U(*acquisition.Session.primary_key) \
+            #     .aggr((load_cell_params & {'equipment_parameter': 'force capacity'}), force_capacity='equipment_parameter_value')
+            #
+            # voltage_output_per_session = dj.U(*acquisition.Session.primary_key) \
+            #     .aggr((load_cell_params & {'equipment_parameter': 'voltage output'}), voltage_output='equipment_parameter_value')
+            #
+            # load_cell_params_per_session = force_capacity_per_session * voltage_output_per_session
 
             # 25 ms Gaussian filter
             filter_rel = processing.Filter.Gaussian & {'sd':25e-3, 'width':4}
 
             # join trial force data with force and load cell parameters
-            force_rel = self * ConditionParams.Force * load_cell_params_per_session
+            force_rel = self * ConditionParams.Force #* load_cell_params_per_session
 
             # fetch force data
             data_type_attr = {'raw':'force_raw_online', 'filt':'force_filt_online'}
             data_attr = data_type_attr[data_type]
             force_data = force_rel \
-                .proj(data_attr, 'force_max', 'force_offset', 'force_capacity', 'voltage_output') \
+                .proj(data_attr, 'force_max', 'force_offset') \
                 .fetch(as_dict=True, order_by='trial')
 
             # sample rate
@@ -736,29 +739,28 @@ class Behavior(dj.Imported):
                 f[data_attr] = f[data_attr].copy()
 
                 # normalize force (V) by load cell capacity (V)
-                f[data_attr] /= f['voltage_output']
+                # f[data_attr] /= f['voltage_output']
 
                 # convert force to proportion of maximum load cell output (N)
-                f[data_attr] *= f['force_capacity']/f['force_max']
+                # f[data_attr] *= f['force_capacity']/f['force_max']
 
                 # subtract baseline force (N)
                 f[data_attr] -= float(f['force_offset'])
 
                 # multiply force by maximum gain (N)
-                f[data_attr] *= f['force_max']
+                # f[data_attr] *= f['force_max']
 
                 # filter
                 if apply_filter:
                     f[data_attr] = filter_rel.filt(f[data_attr], fs)
 
             # pop force parameters
-            for key in ['force_id', 'force_max', 'force_offset', 'force_capacity', 'voltage_output']:
+            for key in ['force_id', 'force_max', 'force_offset']:
                 [f.pop(key) for f in force_data]
 
             # limit output to force signal
             if not keep_keys:
                 force_data = np.array([f[data_attr] for f in force_data])
-
             return force_data
 
     def make(self, key):
@@ -903,13 +905,13 @@ class Behavior(dj.Imported):
                             data['perturbation_offset'] = np.nan_to_num(data['perturbation_offset'])
 
                         if not 'force_filt_online' in data:
-                            filtered_force = (data['cursor_position'] - (1 - params['gain'])/2) \
-                                             * params['frcMax']/params['gain']
-                            data['force_filt_online'] = filtered_force
+                            extracted_force = (data['cursor_position'] - (1 - params['gain']) / 2) \
+                                              * params['frcMax'] / params['gain']
+                            data['force_filt_online'] = extracted_force
                             if not np.isnan(data['force_x_raw']).any():
-                                data['force_raw_online'] = data['force_x_raw']
+                                data['force_raw_online'] = extracted_force
                             else:
-                                data['force_raw_online'] = data['force_y_raw']
+                                data['force_raw_online'] = extracted_force
                             data.pop('cursor_position')
                         # aggregate condition part table parameters into a single dictionary
                         all_cond_attr = {k: round(v, 4) for d in list(cond_attr.values()) for k, v in d.items()}

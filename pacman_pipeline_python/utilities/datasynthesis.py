@@ -1,4 +1,5 @@
 """Utilities for pulling data into the pipeline."""
+import pdb
 
 import datajoint as dj
 import os, re
@@ -48,7 +49,10 @@ def parse_notes(key, read_type: Tuple[str]=('brain', 'emg')):
     brain_attr = None
     emg_attr = None
 
-    note = (acquisition.Session.Notes & key).fetch1('session_notes')
+    try:
+        note = (acquisition.Session.Notes & key).fetch1('session_notes')
+    except:
+        note = 'no notes for this session'
 
     if ('brain' in read_type) and (acquisition.EphysRecording.Channel & key & {'ephys_channel_type': 'brain'}):
 
@@ -64,7 +68,8 @@ def parse_notes(key, read_type: Tuple[str]=('brain', 'emg')):
 
         # electrode array model
         electrode_array_model = None
-        if 'Neuropixels' in note:
+        hardware_used = (acquisition.Session.Hardware & key).fetch('hardware')
+        if ('Neuropixels' in hardware_used) or re.search('Neuropixels', note):
             electrode_array_model = (equipment.ElectrodeArrayModel \
                 & {'electrode_array_model': 'Neuropixels', 'electrode_array_model_version': 'nhp demo'}).fetch1('KEY')
 

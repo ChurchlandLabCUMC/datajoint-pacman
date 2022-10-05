@@ -1,8 +1,10 @@
+import pdb
+
 import datajoint as dj
 import os, re, inspect, itertools
 import pandas as pd
 import numpy as np
-import neo
+import src.neo as neo
 import progressbar
 import matplotlib.pyplot as plt
 from src.churchland_pipeline_python import lab, acquisition, processing
@@ -18,7 +20,33 @@ schema = dj.schema(dj.config.get('database.prefix') + 'churchland_analyses_pacma
 # =======
 # LEVEL 0
 # =======
+@schema
+class ShuffleIds(dj.Manual):
+    definition = """
+    # Shuffle Index Number
+    shuffle_id = 0 : smallint unsigned # 
+    """
 
+
+@schema
+class ReliabilityShuffleIds(dj.Manual):
+    definition = """
+    # Shuffle Index Number
+    shuffle_id = 0 : smallint unsigned # 
+    """
+
+@schema
+class Reliability(dj.Manual):
+    definition = """
+    #pc reliability
+    latents: smallint unsigned #intrinsic dimensionality
+    sample_id = 0 : smallint unsigned
+    embedding_dimensionality: smallint unsigned
+    nconditions : smallint unsigned
+    conditions: varchar(255)
+    ---
+    reliability : longblob
+    """
 @schema
 class AlignmentParams(dj.Manual):
     definition = """
@@ -80,9 +108,9 @@ class BehaviorBlock(dj.Manual):
         monkey: str
     ) -> None:
         """Inserts behavior block entries by reading data from a csv file."""
-
+        # pdb.set_trace()
         # read table from metadata
-        metadata_path = os.path.join(os.path.dirname(__file__), '..', 'metadata', '')
+        metadata_path = os.path.join(os.path.dirname(__file__), 'metadata', '')
         behavior_block_df = pd.read_csv(metadata_path + monkey.lower() + '_behavior_block.csv')
 
         # ensure proper session date format
@@ -111,19 +139,18 @@ class BehaviorBlock(dj.Manual):
 
             # read save tags for block
             save_tag_str = behavior_block_df.loc[idx,'save_tag']
+            if (type(save_tag_str) == str):
+                if re.match('\d:\d',save_tag_str):
+                    save_tags = np.arange(int(save_tag_str[0]), 1+int(save_tag_str[-1]))
 
-            if re.match('\d:\d',save_tag_str):
-                save_tags = np.arange(int(save_tag_str[0]), 1+int(save_tag_str[-1]))
+                else:
+                    save_tags = eval('[' + save_tag_str + ']')
 
-            else:
-                save_tags = eval('[' + save_tag_str + ']')
+                # construct save tag keys
+                save_tag_keys = [dict(key, save_tag=tag) for tag in save_tags]
 
-            # construct save tag keys
-            save_tag_keys = [dict(key, save_tag=tag) for tag in save_tags]
-
-            # insert behavior block save tags
-            self.SaveTag.insert(save_tag_keys)
-
+                # insert behavior block save tags
+                self.SaveTag.insert(save_tag_keys)
 
 @schema
 class BehaviorQualityParams(dj.Manual):
@@ -197,15 +224,21 @@ class EphysTrialStart(dj.Imported):
         fs_ephys = (acquisition.EphysRecording & key).fetch1('ephys_recording_sample_rate') 
 
         # fetch all trial keys with simulation time
-        trial_keys = (pacman_acquisition.Behavior.Trial & key).fetch('KEY','simulation_time',as_dict=True)
-
+        trial_keys = (pacman_acquisition.Behavior.Trial & key).fetch('KEY','simulation_time','trial', as_dict=True)
+        #resort dict by trial number
+        trial_keys.sort(key= lambda x: x['trial'])
         # pop simulation time (Speedgoat clock) from trial key
+
         trial_time = [trial.pop('simulation_time',None) for trial in trial_keys]
 
+
         # sync block start index and encoded time stamp
-        sync_block_start, sync_block_time = (processing.EphysSync.Block & key).fetch('sync_block_start', 'sync_block_time')
+        sync_block_start, sync_block_time =\
+            (processing.EphysSync.Block & key).fetch('sync_block_start', 'sync_block_time')
+        # sync_block_time - sync_block_
 
         # get trial start index in ephys time base
+        print(key['session_date'])
         ephys_trial_start_idx = datasync.get_ephys_trial_start(fs_ephys, trial_time, sync_block_start, sync_block_time)
 
         # legacy adjustment
@@ -214,7 +247,7 @@ class EphysTrialStart(dj.Imported):
 
         # append ephys trial start to key
         trial_keys = [dict(key, **trial_key, ephys_trial_start=i0) for trial_key, i0 in zip(trial_keys, ephys_trial_start_idx)]
-
+        # pdb.set_trace()
         self.insert(trial_keys)
 
 
@@ -362,7 +395,7 @@ class EphysTrialAlignment(dj.Computed):
     key_source = BehaviorTrialAlignment * (EphysTrialStart & 'ephys_trial_start')
 
     def make(self, key):
-
+        # pdb.set_trace()
         # fetch behavior alignment indices
         behavior_alignment = (BehaviorTrialAlignment & key).fetch1()
 
@@ -388,7 +421,7 @@ class EphysTrialAlignment(dj.Computed):
 
             # fetch ephys trial start index and make ephys alignment indices
             ephys_trial_start = (EphysTrialStart & key).fetch1('ephys_trial_start')
-            
+            # pdb.set_trace()
             key.update(ephys_alignment=(x_ephys + align_idx_ephys + ephys_trial_start))
 
         self.insert1(key)
